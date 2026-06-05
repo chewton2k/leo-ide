@@ -43,6 +43,15 @@
         { "path": "$APPDATA/**" },
         { "path": "$HOME/.leo-ide/**" },
         { "path": "/Volumes/**" }
+      ],
+      "deny": [
+        { "path": "$HOME/Pictures/**" },
+        { "path": "$HOME/Music/**" },
+        { "path": "$HOME/Movies/**" },
+        { "path": "$HOME/.Trash/**" },
+        { "path": "$HOME/.ssh/**" },
+        { "path": "$HOME/.aws/**" },
+        { "path": "$HOME/.gnupg/**" }
       ]
     }
   ]
