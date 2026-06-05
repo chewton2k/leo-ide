@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { appearanceMode, uiFontSize, uiDensity } from '../modules';
+  import { appearanceMode, uiDensity, applyActiveTheme, editorTheme, activeCustomThemeId, customThemes } from '../modules';
   import GeneralSection   from './sections/GeneralSection.svelte';
+  import ThemesSection    from './sections/ThemesSection.svelte';
   import TerminalSection  from './sections/TerminalSection.svelte';
   import ShortcutsSection from './sections/ShortcutsSection.svelte';
   import ModelsSection    from './sections/ModelsSection.svelte';
@@ -113,8 +114,14 @@
     }
   });
 
+  // Apply the active theme (custom-theme CSS-var overrides, or the built-in
+  // editor theme's chrome palette) so the settings window matches whatever
+  // theme is set in the main window. Theme stores are localStorage-backed and
+  // shared across windows, so this resolves on open and tracks live changes.
   $effect(() => {
-    document.documentElement.style.fontSize = `${$uiFontSize}px`;
+    $activeCustomThemeId;
+    $customThemes;
+    applyActiveTheme($editorTheme);
   });
 </script>
 
@@ -198,6 +205,8 @@
     <div class="content-inner">
       {#if activeTab === 'general'}
         <GeneralSection />
+      {:else if activeTab === 'themes'}
+        <ThemesSection />
       {:else if activeTab === 'terminal'}
         <TerminalSection />
       {:else if activeTab === 'shortcuts'}
@@ -244,7 +253,7 @@
 
   .root {
     display: grid;
-    grid-template-columns: 240px 1fr;
+    grid-template-columns: clamp(188px, 22vw, 248px) 1fr;
     height: 100vh;
     background: var(--bg-primary);
     color: var(--text-primary);
@@ -405,10 +414,27 @@
     background: var(--bg-primary);
   }
   .content-inner {
-    max-width: 720px;
-    padding: 40px 44px 64px;
+    width: 100%;
+    max-width: 860px;
+    margin: 0 auto;
+    padding: clamp(28px, 4vw, 40px) clamp(22px, 5vw, 44px) 64px;
   }
 
-  .compact .content-inner { padding: 28px 32px 44px; }
+  .compact .content-inner { padding: clamp(20px, 3vw, 28px) clamp(18px, 4vw, 32px) 44px; }
   .compact .nav-btn { padding: 6px 10px; font-size: 12px; }
+
+  /* ── Dynamic layout ────────────────────────────────────────────
+     The window is resizable, so the chrome adapts to its size: the
+     sidebar tightens and narrows, and the content padding shrinks as
+     the window gets smaller. */
+  @media (max-width: 720px) {
+    .sidebar { padding: 18px 10px; gap: 10px; }
+    .sidebar-title { font-size: 15px; padding: 0 8px; }
+    .nav-btn { padding: 7px 10px; font-size: 12px; gap: 8px; }
+  }
+  @media (max-width: 560px) {
+    .root { grid-template-columns: 164px 1fr; }
+    .nav-btn { gap: 7px; }
+    .nav-btn svg { width: 15px; height: 15px; }
+  }
 </style>

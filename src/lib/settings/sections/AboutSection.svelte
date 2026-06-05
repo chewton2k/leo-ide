@@ -4,6 +4,21 @@
   import { open as openUrl } from '@tauri-apps/plugin-shell';
   import { Bug, ExternalLink } from 'lucide-svelte';
   import Icon from '@iconify/svelte';
+  import { updaterStatus, checkForUpdates, installUpdate, type UpdaterStatus } from '../../modules';
+  import { autostartEnabled, syncAutostart, setAutostart } from '../../modules';
+
+  function statusText(s: UpdaterStatus): string {
+    switch (s.kind) {
+      case 'checking': return 'Checking…';
+      case 'uptodate': return "You're on the latest version.";
+      case 'available': return `Update available: v${s.version}`;
+      case 'downloading': return s.total ? `Downloading ${Math.round((100 * s.downloaded) / s.total)}%` : 'Downloading…';
+      case 'ready': return 'Update ready — restarting…';
+      case 'disabled': return "Updates aren't configured for this build.";
+      case 'error': return `Update check failed: ${s.message}`;
+      default: return '';
+    }
+  }
 
   let appVersion = $state('—');
   let tauriVersion = $state('—');
@@ -19,6 +34,7 @@
   onMount(async () => {
     try { appVersion = await getVersion(); } catch {}
     try { tauriVersion = await getTauriVersion(); } catch {}
+    void syncAutostart();
   });
 
   async function openExternal(url: string) {
@@ -53,6 +69,30 @@
     <Bug size={13} />
     <span>Report an issue</span>
     <ExternalLink size={11} class="external" />
+  </button>
+</div>
+
+<div class="updates" data-setting="updates">
+  <button
+    class="link-btn"
+    onclick={checkForUpdates}
+    disabled={$updaterStatus.kind === 'checking' || $updaterStatus.kind === 'downloading'}
+  >
+    <span>Check for updates</span>
+  </button>
+  {#if $updaterStatus.kind === 'available'}
+    <button class="link-btn" onclick={installUpdate}>Restart &amp; install</button>
+  {/if}
+  {#if statusText($updaterStatus)}<span class="update-status">{statusText($updaterStatus)}</span>{/if}
+</div>
+
+<div class="startup" data-setting="autostart">
+  <div class="startup-text">
+    <span class="startup-label">Launch on login</span>
+    <span class="startup-help">Start leo automatically when you sign in.</span>
+  </div>
+  <button class="toggle" class:on={$autostartEnabled} onclick={() => setAutostart(!$autostartEnabled)} aria-label="Toggle launch on login">
+    <span class="toggle-knob"></span>
   </button>
 </div>
 
@@ -164,4 +204,57 @@
     color: var(--text-muted);
     margin-left: 2px;
   }
+
+  .updates {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    margin-top: 14px;
+  }
+  .update-status { font-size: 11px; color: var(--text-muted); }
+  .link-btn:disabled { opacity: 0.6; cursor: default; transform: none; }
+
+  .startup {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin: 18px auto 0;
+    max-width: 360px;
+    padding: 12px 14px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+  .startup-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .startup-label { font-size: 13px; color: var(--text-primary); }
+  .startup-help { font-size: 11px; color: var(--text-muted); line-height: 1.4; }
+
+  .toggle {
+    position: relative;
+    width: 34px; height: 20px;
+    border-radius: 10px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+    flex-shrink: 0;
+    padding: 0;
+  }
+  .toggle:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--accent) 50%, transparent);
+    outline-offset: 2px;
+  }
+  .toggle.on { background: var(--settings-icon, #B34B3C); border-color: var(--settings-icon, #B34B3C); }
+  .toggle-knob {
+    position: absolute;
+    top: 2px; left: 2px;
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    transition: transform 0.15s ease, background 0.15s ease;
+  }
+  .toggle.on .toggle-knob { transform: translateX(14px); background: #fff; }
 </style>

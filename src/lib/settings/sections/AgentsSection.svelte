@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { ghostTextEnabled, ghostTextDelay, agentMaxStepsConfig, agentAutoApproveConfig, ghostTextModel, editModel } from '../../modules';
+  import { ghostTextEnabled, ghostTextDelay, agentMaxStepsConfig, agentAutoApproveConfig, ghostTextModel, editModel,
+    customAgents, activeAgentId, saveCustomAgent, deleteCustomAgent, ALL_TOOL_NAMES, agentNotifications, type ToolName, type CustomAgent } from '../../modules';
   import SectionHeader from '../components/SectionHeader.svelte';
 
   type PermLevel = 'allow' | 'ask' | 'deny';
@@ -32,6 +33,32 @@
     { id: 'run_command', label: 'Run commands', icon: 'M4 17l6-6-6-6 M12 19h8', level: perms.run_command },
     { id: 'dangerous', label: 'Dangerous commands', icon: 'M12 9v4 M12 17h.01 M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z', level: perms.dangerous, locked: true },
   ]);
+
+  // ── Custom agents CRUD ──
+  let agentEditing = $state(false);
+  let agentForm = $state<{ id: string; name: string; systemPrompt: string; tools: ToolName[] }>(
+    { id: '', name: '', systemPrompt: '', tools: [] }
+  );
+
+  function newAgent() {
+    agentForm = { id: crypto.randomUUID(), name: '', systemPrompt: '', tools: [] };
+    agentEditing = true;
+  }
+  function editAgent(a: CustomAgent) {
+    agentForm = { id: a.id, name: a.name, systemPrompt: a.systemPrompt, tools: [...a.tools] };
+    agentEditing = true;
+  }
+  function toggleAgentTool(t: ToolName) {
+    agentForm.tools = agentForm.tools.includes(t)
+      ? agentForm.tools.filter(x => x !== t)
+      : [...agentForm.tools, t];
+  }
+  function saveAgent() {
+    if (!agentForm.name.trim()) return;
+    saveCustomAgent({ ...agentForm, name: agentForm.name.trim() });
+    activeAgentId.set(agentForm.id);
+    agentEditing = false;
+  }
 </script>
 
 <div class="root">
@@ -82,6 +109,13 @@
         </button>
       </label>
       <p class="hint">When enabled, the agent applies code changes without asking. Use with caution.</p>
+      <label class="toggle-row" data-setting="agent-notifications">
+        <span>Finish notifications</span>
+        <button class="toggle" class:on={$agentNotifications} onclick={() => agentNotifications.update(v => !v)} aria-label="Toggle agent notifications">
+          <span class="toggle-knob"></span>
+        </button>
+      </label>
+      <p class="hint">Notify when the agent finishes while leo is in the background — an OS notification when unfocused, an in-app toast when focused.</p>
     </div>
   </div>
 
@@ -175,13 +209,54 @@
   </div>
 
   <!-- Custom Agents -->
-  <div class="card muted">
+  <div class="card">
     <div class="card-head">
       <div class="card-title">Custom Agents</div>
-      <span class="badge">Coming Soon</span>
     </div>
     <div class="card-body">
-      <p class="hint">Build personalized AI agents with custom personas, instructions, and tool access.</p>
+      <p class="hint" style="margin-bottom: 8px;">Named agents with their own system prompt and tool subset. Select one for agent runs; the default agent uses all tools.</p>
+      <div class="agent-list">
+        <label class="agent-row">
+          <input type="radio" name="active-agent" checked={$activeAgentId === ''} onchange={() => activeAgentId.set('')} />
+          <span class="agent-name">Default agent</span>
+          <span class="agent-meta">all tools</span>
+        </label>
+        {#each $customAgents as a (a.id)}
+          <div class="agent-row">
+            <label class="agent-pick">
+              <input type="radio" name="active-agent" checked={$activeAgentId === a.id} onchange={() => activeAgentId.set(a.id)} />
+              <span class="agent-name">{a.name}</span>
+              <span class="agent-meta">{a.tools.length ? `${a.tools.length} tools` : 'all tools'}</span>
+            </label>
+            <div class="agent-actions">
+              <button class="mini-btn ghost" onclick={() => editAgent(a)}>Edit</button>
+              <button class="mini-btn ghost" onclick={() => deleteCustomAgent(a.id)}>Delete</button>
+            </div>
+          </div>
+        {/each}
+      </div>
+
+      {#if agentEditing}
+        <div class="agent-form">
+          <input class="agent-input" placeholder="Agent name" bind:value={agentForm.name} />
+          <textarea class="agent-textarea" placeholder="System prompt…" bind:value={agentForm.systemPrompt}></textarea>
+          <div class="hint">Allowed tools (none selected = all):</div>
+          <div class="tool-grid">
+            {#each ALL_TOOL_NAMES as t}
+              <label class="tool-check">
+                <input type="checkbox" checked={agentForm.tools.includes(t)} onchange={() => toggleAgentTool(t)} />
+                <span>{t}</span>
+              </label>
+            {/each}
+          </div>
+          <div class="agent-form-actions">
+            <button class="mini-btn" onclick={saveAgent}>Save agent</button>
+            <button class="mini-btn ghost" onclick={() => (agentEditing = false)}>Cancel</button>
+          </div>
+        </div>
+      {:else}
+        <button class="mini-btn" style="margin-top: 8px;" onclick={newAgent}>+ New agent</button>
+      {/if}
     </div>
   </div>
 </div>
@@ -189,14 +264,36 @@
 <style>
   .root { display: flex; flex-direction: column; gap: 20px; }
 
+  .agent-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+  .agent-row { display: flex; align-items: center; gap: 8px; padding: 6px 4px; border-radius: 6px; }
+  .agent-row:hover { background: var(--bg-surface); }
+  .agent-pick { display: flex; align-items: center; gap: 8px; flex: 1; cursor: pointer; }
+  .agent-name { font-size: 13px; color: var(--text-primary); }
+  .agent-meta { font-size: 11px; color: var(--text-muted); }
+  .agent-actions { display: flex; gap: 4px; }
+  .agent-form { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; }
+  .agent-input, .agent-textarea {
+    background: var(--bg-tertiary); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; font-size: 12px;
+  }
+  .agent-input:focus, .agent-textarea:focus { outline: none; border-color: var(--settings-icon, #B34B3C); }
+  .agent-textarea { min-height: 90px; resize: vertical; font-family: var(--font-mono); }
+  .tool-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 4px; }
+  .tool-check { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-secondary); }
+  .agent-form-actions { display: flex; gap: 8px; }
+  .mini-btn {
+    padding: 6px 12px; border-radius: 6px; font-size: 12px; cursor: pointer;
+    background: var(--bg-surface); color: var(--text-primary); border: 1px solid var(--border);
+  }
+  .mini-btn:hover { border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); }
+  .mini-btn.ghost { background: none; color: var(--text-muted); }
+
   .card {
     background: var(--bg-tertiary);
     border: 1px solid var(--border);
     border-radius: 10px;
     overflow: hidden;
   }
-
-  .card.muted { opacity: 0.6; }
 
   .card-head {
     display: flex;
@@ -207,15 +304,6 @@
   }
 
   .card-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
-
-  .badge {
-    font-size: 10px;
-    padding: 2px 8px;
-    border-radius: 8px;
-    background: var(--bg-surface);
-    color: var(--text-muted);
-    border: 1px solid var(--border);
-  }
 
   .card-body {
     padding: 14px 16px;

@@ -12,7 +12,7 @@
  * referenced in section markup via `data-setting="..."`.
  */
 
-export type SettingsTabId = 'general' | 'terminal' | 'shortcuts' | 'models' | 'agents' | 'knowledge' | 'about';
+export type SettingsTabId = 'general' | 'themes' | 'terminal' | 'shortcuts' | 'models' | 'agents' | 'knowledge' | 'about';
 
 export interface SettingsTab {
   id: SettingsTabId;
@@ -37,6 +37,7 @@ export interface SettingsEntry {
 
 export const SETTINGS_TABS: SettingsTab[] = [
   { id: 'general',   label: 'General',   keywords: 'appearance theme editor font tab autosave density hidden patterns preview word wrap line numbers error lens vim',           icon: 'M4 21v-7 M4 10V3 M12 21v-9 M12 8V3 M20 21v-5 M20 12V3 M1 14h6 M9 8h6 M17 16h6' },
+  { id: 'themes',    label: 'Themes',    keywords: 'theme custom json background image gif opacity blur color appearance surface wallpaper',                              icon: 'M12 2a10 10 0 1 0 0 20 2 2 0 0 0 2-2 2 2 0 0 1 2-2h1a4 4 0 0 0 4-4 8 8 0 0 0-8-8Z M7.5 11a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z M12 7.5a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z M16.5 11a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z' },
   { id: 'terminal',  label: 'Terminal',  keywords: 'shell xterm bash zsh fish layout panel tab font size profile',                                                            icon: 'M3 5h18v14H3z M7 10l3 2-3 2 M13 14h4' },
   { id: 'shortcuts', label: 'Shortcuts', keywords: 'keyboard keybindings hotkeys shortcut',                                                                                   icon: 'M2 8h20v8H2z M6 12h.01 M10 12h.01 M14 12h.01 M18 12h.01' },
   { id: 'models',    label: 'Models',    keywords: 'ai api key openrouter openai anthropic provider claude gpt llm default model',                                             icon: 'M12 2v4 M12 18v4 M4.93 4.93l2.83 2.83 M16.24 16.24l2.83 2.83 M2 12h4 M18 12h4 M4.93 19.07l2.83-2.83 M16.24 7.76l2.83-2.83 M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z' },
@@ -46,10 +47,15 @@ export const SETTINGS_TABS: SettingsTab[] = [
 ];
 
 export const SETTINGS_ENTRIES: SettingsEntry[] = [
+  // ── Themes › Background ──
+  { anchor: 'background-image',   tab: 'themes', group: 'Background', label: 'Background image', keywords: 'background image gif wallpaper surface picture photo' },
+  { anchor: 'background-opacity', tab: 'themes', group: 'Background', label: 'Background opacity', keywords: 'opacity transparency fade strength' },
+  { anchor: 'background-blur',    tab: 'themes', group: 'Background', label: 'Background blur', keywords: 'blur radius gaussian' },
   // ── General › Appearance / Theme / Interface ──
   { anchor: 'appearance',            tab: 'general', group: 'Appearance', label: 'Appearance',            keywords: 'theme system light dark mode color scheme' },
-  { anchor: 'editor-theme',          tab: 'general', group: 'Editor theme', label: 'Editor theme',        keywords: 'syntax highlight color scheme one dark dracula github tokyo night nord catppuccin rose pine solarized' },
-  { anchor: 'ui-font-size',          tab: 'general', group: 'Interface', label: 'UI font size',           keywords: 'text size chrome sidebar toolbar' },
+  { anchor: 'custom-theme',          tab: 'themes',  group: 'Theme', label: 'Editor / syntax theme',     keywords: 'syntax highlight color scheme one dark github tokyo night nord catppuccin solarized latte light plum' },
+  { anchor: 'custom-theme',          tab: 'themes',  group: 'Theme', label: 'Custom themes',              keywords: 'theme custom json palette colors edit delete create swatch text highlight selection' },
+  { anchor: 'ui-zoom',               tab: 'general', group: 'Interface', label: 'UI zoom level',          keywords: 'zoom scale text size chrome sidebar toolbar bigger smaller font' },
   { anchor: 'ui-density',            tab: 'general', group: 'Interface', label: 'Density',                keywords: 'compact comfortable spacing padding' },
 
   // ── General › Editor ──
@@ -58,11 +64,13 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
   { anchor: 'editor-word-wrap',      tab: 'general', group: 'Editor', label: 'Word wrap',                keywords: 'wrap lines soft wrapping long lines' },
   { anchor: 'editor-line-numbers',   tab: 'general', group: 'Editor', label: 'Line numbers',             keywords: 'gutter row numbers' },
   { anchor: 'editor-error-lens',     tab: 'general', group: 'Editor', label: 'Error lens',               keywords: 'inline errors diagnostics syntax warnings squiggles' },
+  { anchor: 'updates',               tab: 'about',   group: 'About', label: 'Check for updates',         keywords: 'update upgrade version install download release new' },
   { anchor: 'editor-vim-mode',      tab: 'general', group: 'Editor', label: 'Vim mode',                 keywords: 'vim vi keybindings modal hjkl normal insert visual' },
 
   // ── Terminal ──
   { anchor: 'terminal-mode',         tab: 'terminal', group: 'Layout', label: 'Terminal layout',         keywords: 'tab panel bottom docked vscode zed xcode placement position surface' },
   { anchor: 'terminal-font-size',    tab: 'terminal', group: 'Typography', label: 'Terminal font size',  keywords: 'text size shell xterm' },
+  { anchor: 'terminal-renderer-pool', tab: 'terminal', group: 'Performance', label: 'Limit GPU renderers', keywords: 'webgl gpu renderer pool context performance memory panes hardware acceleration' },
 
   // ── General › Preview ──
   { anchor: 'preview-default-url',   tab: 'general', group: 'Preview', label: 'Preview default URL',     keywords: 'localhost web browser dev server iframe' },
@@ -98,7 +106,7 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
   { anchor: 'knowledge-conversations', tab: 'knowledge', group: 'Knowledge', label: 'Conversations',      keywords: 'chat history memory clear delete' },
 
   // ── Shortcuts (one-entry) ──
-  { anchor: 'shortcuts',             tab: 'shortcuts', group: 'Shortcuts', label: 'Keyboard shortcuts',   keywords: 'keybindings hotkeys cmd ctrl' },
+  { anchor: 'shortcuts',             tab: 'shortcuts', group: 'Shortcuts', label: 'Keyboard shortcuts',   keywords: 'keybindings hotkeys cmd ctrl inline ai edit ask line selection cmd-k' },
 
   // ── About (one-entry) ──
   { anchor: 'about',                 tab: 'about', group: 'About', label: 'About leo',                   keywords: 'version info tauri' },

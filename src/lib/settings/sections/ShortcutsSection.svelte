@@ -54,8 +54,8 @@
 
     e.preventDefault();
     e.stopPropagation();
-    recordedKeys = normalized;
-    conflicts = findConflicts(normalized, recordingId);
+    recordedKeys = recordedKeys ? `${recordedKeys} ${normalized}` : normalized;
+    conflicts = findConflicts(recordedKeys, recordingId);
   }
 
   function confirmBinding() {

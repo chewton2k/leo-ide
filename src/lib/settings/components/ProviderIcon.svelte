@@ -13,12 +13,14 @@
     openrouter: 'simple-icons:openrouter',
     openai:     'simple-icons:openai',
     anthropic:  'simple-icons:anthropic',
+    local:      'lucide:hard-drive',
   };
 
   const COLOR: Record<AiProvider, string> = {
     openrouter: '#cdd6f4',
     openai:     '#10a37f',
     anthropic:  '#d97757',
+    local:      '#94e2d5',
   };
 </script>
 

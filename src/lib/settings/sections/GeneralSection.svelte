@@ -1,18 +1,20 @@
 <script lang="ts">
   import {
-    appearanceMode, editorTheme, uiFontSize, uiDensity,
+    appearanceMode, uiZoom, uiDensity,
     editorFontSize, editorTabSize, editorWordWrap, editorLineNumbers,
     editorShowErrorLens, editorVimMode,
     previewUrl,
     autosaveEnabled, autosaveDelay,
     maxRecentProjects, maxTabs,
     hiddenPatterns,
-    EDITOR_THEMES, EDITOR_THEME_LABELS,
-    type AppearanceMode, type EditorThemeId,
+    type AppearanceMode,
   } from '../../modules';
   import { save, open } from '@tauri-apps/plugin-dialog';
   import { writeTextFile, readTextFile } from '@tauri-apps/plugin-fs';
   import SectionHeader from '../components/SectionHeader.svelte';
+  import Slider from '../components/Slider.svelte';
+
+  const ZOOM_MIN = 0.5, ZOOM_MAX = 2, ZOOM_STEP = 0.05;
 
   let newPattern = $state('');
   let exportImportStatus = $state('');
@@ -45,7 +47,7 @@
     'leo-terminal-font-size',
     'leo-terminal-mode', 'leo-terminal-panel-height',
     'leo-appearance', 'leo-editor-theme',
-    'leo-ui-font-size', 'leo-ui-density',
+    'leo-ui-zoom', 'leo-ui-density',
     'leo-hidden-patterns',
     'leo-max-recent-projects', 'leo-max-tabs',
   ];
@@ -109,37 +111,28 @@
     </div>
   </div>
 
-  <!-- Editor Theme -->
-  <div class="card" data-setting="editor-theme">
-    <div class="card-head">
-      <div class="card-title">Editor theme</div>
-      <div class="card-sub">Syntax highlighting and editor background.</div>
-    </div>
-    <div class="rows" style="margin-top: 8px;">
-      <select class="select" value={$editorTheme} onchange={(e) => editorTheme.set((e.currentTarget as HTMLSelectElement).value as EditorThemeId)}>
-        {#each EDITOR_THEMES as t}
-          <option value={t}>{EDITOR_THEME_LABELS[t]}</option>
-        {/each}
-      </select>
-    </div>
-  </div>
-
   <!-- Interface -->
   <div class="card">
     <div class="card-head">
       <div class="card-title">Interface</div>
     </div>
     <div class="rows">
-      <div class="row" data-setting="ui-font-size">
-        <div class="row-info">
-          <div class="row-label">UI font size</div>
-          <div class="row-help">Size of all in-app text.</div>
+      <div class="zoom-row" data-setting="ui-zoom">
+        <div class="zoom-head">
+          <div class="row-info">
+            <div class="row-label">UI zoom level</div>
+            <div class="row-help">Scale the entire interface up or down.</div>
+          </div>
+          <span class="zoom-val">{Math.round($uiZoom * 100)}%</span>
         </div>
-        <div class="stepper">
-          <button class="step-btn" onclick={() => uiFontSize.update(v => Math.max(11, v - 1))}>−</button>
-          <span class="step-val">{$uiFontSize}px</span>
-          <button class="step-btn" onclick={() => uiFontSize.update(v => Math.min(18, v + 1))}>+</button>
-        </div>
+        <Slider
+          value={$uiZoom}
+          min={ZOOM_MIN}
+          max={ZOOM_MAX}
+          step={ZOOM_STEP}
+          ariaLabel="UI zoom level"
+          onChange={(v) => uiZoom.set(Math.round(v * 100) / 100)}
+        />
       </div>
       <div class="row" data-setting="ui-density">
         <div class="row-info">
@@ -355,6 +348,14 @@
   .row-label { font-size: 13px; color: var(--text-primary); }
   .row-help { font-size: 11px; color: var(--text-muted); line-height: 1.4; }
 
+  .zoom-row { display: flex; flex-direction: column; gap: 12px; padding: 12px 0; }
+  .zoom-row + .row { border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+  .zoom-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+  .zoom-val {
+    font-size: 12px; color: var(--text-secondary);
+    font-variant-numeric: tabular-nums; flex-shrink: 0;
+  }
+
   /* Toggle */
   .toggle { padding: 0; background: none; border: none; cursor: pointer; flex-shrink: 0; }
   .track {
@@ -464,14 +465,6 @@
     font-weight: 500;
   }
 
-  .select {
-    width: 100%; padding: 8px 12px; border-radius: 6px;
-    background: var(--bg-secondary); color: var(--text-primary);
-    border: 1px solid var(--border); font-size: 13px;
-    cursor: pointer; appearance: auto;
-  }
-  .select:focus { border-color: var(--accent); outline: none; }
-
   .text-input {
     width: 180px; padding: 6px 10px; border-radius: 6px;
     background: var(--bg-secondary); color: var(--text-primary);
@@ -560,7 +553,6 @@
   .step-btn:focus-visible,
   .pill:focus-visible,
   .appearance-card:focus-visible,
-  .select:focus-visible,
   .text-input:focus-visible,
   .add-input:focus-visible,
   .add-btn:focus-visible,

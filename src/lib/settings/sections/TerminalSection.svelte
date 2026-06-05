@@ -10,7 +10,7 @@
    * styles as GeneralSection — duplicated here because each section in
    * this codebase owns its own scoped CSS.
    */
-  import { terminalMode, terminalFontSize } from '../../modules';
+  import { terminalMode, terminalFontSize, terminalRendererPoolEnabled } from '../../modules';
   import SectionHeader from '../components/SectionHeader.svelte';
 </script>
 
@@ -77,6 +77,33 @@
       </div>
     </div>
   </div>
+
+  <!-- Performance. -->
+  <div class="card">
+    <div class="card-head">
+      <div class="card-title">Performance</div>
+    </div>
+    <div class="rows">
+      <div class="row" data-setting="terminal-renderer-pool">
+        <div class="row-info">
+          <div class="row-label">Limit GPU renderers</div>
+          <div class="row-help">
+            Keeps at most 5 terminals on the fast WebGL renderer at once; the
+            least-recently-used ones fall back to the standard renderer. Prevents
+            GPU-context exhaustion (garbled/blank terminals) when many panes are open.
+          </div>
+        </div>
+        <button
+          class="toggle"
+          class:active={$terminalRendererPoolEnabled}
+          onclick={() => terminalRendererPoolEnabled.update(v => !v)}
+          aria-label="Toggle GPU renderer limit"
+        >
+          <span class="track"><span class="thumb"></span></span>
+        </button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <style>
@@ -118,6 +145,29 @@
   .row-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .row-label { font-size: 13px; color: var(--text-primary); }
   .row-help { font-size: 11px; color: var(--text-muted); line-height: 1.4; }
+
+  /* Toggle (mirrors GeneralSection). */
+  .toggle { padding: 0; background: none; border: none; cursor: pointer; flex-shrink: 0; }
+  .track {
+    display: block;
+    width: 34px; height: 20px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    position: relative;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .toggle.active .track { background: var(--settings-icon, #B34B3C); border-color: var(--settings-icon, #B34B3C); }
+  .thumb {
+    display: block;
+    width: 14px; height: 14px;
+    background: var(--text-muted);
+    border-radius: 50%;
+    position: absolute;
+    top: 2px; left: 2px;
+    transition: transform 0.15s, background 0.15s;
+  }
+  .toggle.active .thumb { transform: translateX(14px); background: #fff; }
 
   /* Stepper */
   .stepper {
