@@ -6,6 +6,7 @@ const specialFileIcons: Record<string, string> = {
   'dockerfile': 'vscode-icons:file-type-docker',
   'docker-compose.yml': 'vscode-icons:file-type-docker',
   'docker-compose.yaml': 'vscode-icons:file-type-docker',
+  '.dockerignore': 'vscode-icons:file-type-docker',
   '.gitignore': 'vscode-icons:file-type-git',
   '.gitmodules': 'vscode-icons:file-type-git',
   '.gitattributes': 'vscode-icons:file-type-git',
@@ -50,7 +51,7 @@ const specialFileIcons: Record<string, string> = {
   'deno.json': 'vscode-icons:file-type-deno',
   'vercel.json': 'vscode-icons:file-type-vercel',
   'netlify.toml': 'vscode-icons:file-type-netlify',
-  '.github': 'vscode-icons:file-type-github',
+  '.github': 'vscode-icons:file-type-git',
   'prisma': 'vscode-icons:file-type-prisma',
 };
 
@@ -99,7 +100,7 @@ const extensionIcons: Record<string, string> = {
   pl: 'vscode-icons:file-type-perl',
   // Mobile
   swift: 'vscode-icons:file-type-swift',
-  dart: 'vscode-icons:file-type-dart',
+  dart: 'vscode-icons:file-type-dartlang',
   // Data / query
   sql: 'vscode-icons:file-type-sql',
   graphql: 'vscode-icons:file-type-graphql',
@@ -118,15 +119,15 @@ const extensionIcons: Record<string, string> = {
   cfg: 'vscode-icons:file-type-config',
   conf: 'vscode-icons:file-type-config',
   env: 'vscode-icons:file-type-dotenv',
-  lock: 'vscode-icons:file-type-lock',
+  lock: 'vscode-icons:default-file',
   // Documentation / text
   md: 'vscode-icons:file-type-markdown',
   mdx: 'vscode-icons:file-type-mdx',
   markdown: 'vscode-icons:file-type-markdown',
   txt: 'vscode-icons:file-type-text',
   log: 'vscode-icons:file-type-log',
-  csv: 'vscode-icons:file-type-csv',
-  tsv: 'vscode-icons:file-type-csv',
+  csv: 'vscode-icons:file-type-text',
+  tsv: 'vscode-icons:file-type-text',
   tex: 'vscode-icons:file-type-tex',
   latex: 'vscode-icons:file-type-tex',
   bib: 'vscode-icons:file-type-tex',
@@ -185,33 +186,66 @@ const extensionIcons: Record<string, string> = {
   dylib: 'vscode-icons:file-type-binary',
 };
 
+const FOLDER_ICONS: Record<string, string> = {
+  'src': 'vscode-icons:folder-type-src',
+  'lib': 'vscode-icons:folder-type-library',
+  'test': 'vscode-icons:folder-type-test',
+  'tests': 'vscode-icons:folder-type-test',
+  '__tests__': 'vscode-icons:folder-type-test',
+  'node_modules': 'vscode-icons:folder-type-node',
+  '.git': 'vscode-icons:folder-type-git',
+  '.github': 'vscode-icons:folder-type-github',
+  '.vscode': 'vscode-icons:folder-type-vscode',
+  'dist': 'vscode-icons:folder-type-dist',
+  'build': 'vscode-icons:folder-type-dist',
+  'public': 'vscode-icons:folder-type-public',
+  'assets': 'vscode-icons:folder-type-asset',
+  'images': 'vscode-icons:folder-type-images',
+  'docs': 'vscode-icons:folder-type-docs',
+  'config': 'vscode-icons:folder-type-config',
+  'components': 'vscode-icons:folder-type-component',
+  'hooks': 'vscode-icons:folder-type-hook',
+  'utils': 'vscode-icons:folder-type-tools',
+  'api': 'vscode-icons:folder-type-api',
+  'styles': 'vscode-icons:folder-type-css',
+};
+
+// Icon ids returned by the conditional/default branches of getFileIconName
+// (keep in sync with the literals below).
+const EXTRA_ICON_IDS = [
+  'vscode-icons:default-file',
+  'vscode-icons:default-folder',
+  'vscode-icons:default-folder-opened',
+  'vscode-icons:file-type-dotenv',
+  'vscode-icons:file-type-testts',
+  'vscode-icons:file-type-testjs',
+  'vscode-icons:file-type-typescriptdef',
+  'vscode-icons:file-type-cssmap',
+  'vscode-icons:file-type-storybook',
+];
+
+/**
+ * The finite, deduped set of vscode-icons ids this module can ever return —
+ * used to register icons offline (no api.iconify.design fetch). Includes the
+ * `-opened` variant of every folder icon.
+ */
+export function collectUsedIconNames(): string[] {
+  const set = new Set<string>([
+    ...Object.values(specialFileIcons),
+    ...Object.values(extensionIcons),
+    ...EXTRA_ICON_IDS,
+  ]);
+  for (const id of Object.values(FOLDER_ICONS)) {
+    set.add(id);
+    set.add(id + '-opened');
+  }
+  return [...set];
+}
+
 export function getFileIconName(name: string, isDir = false, isOpen = false): string {
   if (isDir) {
     const lower = name.toLowerCase();
-    const folderIcons: Record<string, string> = {
-      'src': 'vscode-icons:folder-type-src',
-      'lib': 'vscode-icons:folder-type-library',
-      'test': 'vscode-icons:folder-type-test',
-      'tests': 'vscode-icons:folder-type-test',
-      '__tests__': 'vscode-icons:folder-type-test',
-      'node_modules': 'vscode-icons:folder-type-node',
-      '.git': 'vscode-icons:folder-type-git',
-      '.github': 'vscode-icons:folder-type-github',
-      '.vscode': 'vscode-icons:folder-type-vscode',
-      'dist': 'vscode-icons:folder-type-dist',
-      'build': 'vscode-icons:folder-type-dist',
-      'public': 'vscode-icons:folder-type-public',
-      'assets': 'vscode-icons:folder-type-asset',
-      'images': 'vscode-icons:folder-type-images',
-      'docs': 'vscode-icons:folder-type-docs',
-      'config': 'vscode-icons:folder-type-config',
-      'components': 'vscode-icons:folder-type-component',
-      'hooks': 'vscode-icons:folder-type-hook',
-      'utils': 'vscode-icons:folder-type-utils',
-      'api': 'vscode-icons:folder-type-api',
-      'styles': 'vscode-icons:folder-type-css',
-    };
-    const icon = folderIcons[lower];
+    const icon = FOLDER_ICONS[lower];
     if (icon) return isOpen ? icon + '-opened' : icon;
     return isOpen ? 'vscode-icons:default-folder-opened' : 'vscode-icons:default-folder';
   }

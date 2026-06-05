@@ -3,17 +3,17 @@
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { open, ask } from '@tauri-apps/plugin-dialog';
-  import { watch, type UnwatchFn } from '@tauri-apps/plugin-fs';
   import { startDrag } from '@crabnebula/tauri-plugin-drag';
   import Icon from '@iconify/svelte';
   import { FolderOpen, Folder, ChevronRight, Link2 } from 'lucide-svelte';
-  import { projectRoot, hiddenPatterns, renameOpenFile, fileTreeRefreshTrigger, closeAllUnpinned, sharedGitStatus, sharedGitRemoteStatus, gitBranch, addFile, togglePin, activeFilePath, fileTreeNavTarget, openDiagrams, diagramPath, showPreview, createFileSignal, createFolderSignal, expandedDirsStore, showTerminal, createTerminalSignal } from '../../modules';
+  import { projectRoot, hiddenPatterns, renameOpenFile, fileTreeRefreshTrigger, closeAllUnpinned, sharedGitStatus, sharedGitRemoteStatus, gitBranch, addFile, togglePin, activeFilePath, fileTreeNavTarget, openDiagrams, diagramPath, showPreview, createFileSignal, createFolderSignal, expandedDirsStore, showTerminal, resetTerminalSignal, watchAdd, watchRemove, attachFile, showChat, previewUrl, activeTerminalCwd, pendingTerminalCwd, shouldFollowCwd } from '../../modules';
   import { saveSessionNow, findRecentProject } from '../../modules/session';
   import { beginGitBranchRequest, getLatestGitBranchRequestId, updateGitBranch } from '../../modules/git/branchUpdate';
   import { log } from '../../modules/logging';
   import { exists } from '@tauri-apps/plugin-fs';
   import Button from '../ui/button/Button.svelte';
   import { getFileIconName } from '../../modules/explorer';
+  import { portal } from '../../modules/ui';
 
   function isValidName(name: string): boolean {
     return name.length > 0 && !/[\/\\]/.test(name) && name !== '..' && name !== '.';
@@ -51,6 +51,13 @@
   // Sync local expandedDirs to the shared store for session persistence
   $effect(() => {
     expandedDirsStore.set(expandedDirs);
+  });
+
+  // Follow the active terminal's working directory: when the focused
+  // terminal pane cds, re-root the explorer to that directory.
+  $effect(() => {
+    const cwd = $activeTerminalCwd;
+    if (cwd) untrack(() => { void followCwd(cwd); });
   });
 
   $effect(() => {
@@ -421,31 +428,89 @@
     if (!document.hidden && rootPath) fetchGitStatus();
   }
 
-  // File watcher
-  let unwatchFn: UnwatchFn | null = null;
+  // File watcher (native fs_watch + fs:changed). We watch the root plus every
+  // expanded directory non-recursively; the Rust side debounces and skips
+  // heavy dirs (node_modules, target, …) so churn there can't storm the UI.
+  let watchedDirs = new Set<string>();
+  let unlistenFsChanged: (() => void) | null = null;
   let watchDebounce: ReturnType<typeof setTimeout> | null = null;
 
-  async function startWatching(path: string) {
+  function desiredWatchDirs(): Set<string> {
+    const set = new Set<string>();
+    if (rootPath) set.add(rootPath);
+    for (const d of expandedDirs) set.add(d);
+    return set;
+  }
+
+  /** Reconcile the OS watches with the currently-visible directories. */
+  function syncWatches() {
+    if (!rootPath) return;
+    const desired = desiredWatchDirs();
+    const toAdd = [...desired].filter(d => !watchedDirs.has(d));
+    const toRemove = [...watchedDirs].filter(d => !desired.has(d));
+    watchAdd(toAdd);
+    watchRemove(toRemove);
+    watchedDirs = desired;
+  }
+
+  async function startWatching(_path: string) {
     await stopWatching();
-    unwatchFn = await watch(path, () => {
-      // Debounce to avoid rapid-fire reloads
+    unlistenFsChanged = await listen<{ paths: string[] }>('fs:changed', (e) => {
+      // Global event — only react to changes inside this window's project.
+      if (!rootPath || !e.payload.paths.some(p => p.startsWith(rootPath!))) return;
       if (watchDebounce) clearTimeout(watchDebounce);
-      watchDebounce = setTimeout(() => refreshTree(), 300);
-    }, { recursive: true });
+      watchDebounce = setTimeout(() => refreshTree({ fromWatcher: true }), 300);
+    });
+    syncWatches();
   }
 
   async function stopWatching() {
-    if (unwatchFn) {
-      unwatchFn();
-      unwatchFn = null;
-    }
+    if (unlistenFsChanged) { unlistenFsChanged(); unlistenFsChanged = null; }
+    if (watchDebounce) { clearTimeout(watchDebounce); watchDebounce = null; }
+    watchRemove([...watchedDirs]);
+    watchedDirs = new Set();
   }
 
-  let refreshInProgress = false;
+  // Keep OS watches in sync as the user expands/collapses folders.
+  $effect(() => {
+    expandedDirs;
+    if (rootPath && unlistenFsChanged) untrack(() => syncWatches());
+  });
 
-  async function refreshTree() {
+  let refreshInProgress = false;
+  /**
+   * `true` when a watcher-triggered refresh was suppressed because the
+   * user is currently typing in the new-file/new-folder input. We flush
+   * this once `creating` is cleared (in confirmCreate / cancelCreate)
+   * so the tree still picks up external changes that happened during
+   * the create flow — we just don't unmount the input mid-keystroke.
+   */
+  let pendingWatcherRefresh = false;
+
+  async function refreshTree(opts: { fromWatcher?: boolean } = {}) {
     if (!rootPath) return;
-    if (refreshInProgress) return; // Prevent overlapping refreshes
+    // Defer watcher-driven refreshes while the user is creating a
+    // file/folder. `refreshTree` replaces `files = newFiles`, which
+    // causes Svelte to re-render the snippet that hosts `newNameInput`
+    // and unmounts the input element — blurring it. The input's
+    // `onblur` handler then cancels the create flow, so the user
+    // appears to be unable to create folders when external file events
+    // fire (e.g. while many terminals are running and a build tool is
+    // touching files). Explicit refreshes (after confirmCreate) are
+    // not deferred — they're triggered AFTER `creating` is cleared.
+    if (opts.fromWatcher && creating) {
+      pendingWatcherRefresh = true;
+      return;
+    }
+    if (refreshInProgress) {
+      // Don't silently drop watcher events that arrive while an
+      // explicit refresh is running. Mark them as pending so they're
+      // flushed once the in-flight refresh completes (or, for the
+      // common case where another watcher event will fire within the
+      // 300ms debounce, the next event will succeed).
+      if (opts.fromWatcher) pendingWatcherRefresh = true;
+      return;
+    }
     refreshInProgress = true;
     try {
       const newFiles = await invoke<FileEntry[]>('read_dir_tree', { path: rootPath, depth: 1 });
@@ -463,6 +528,22 @@
       await fetchGitStatus();
     } finally {
       refreshInProgress = false;
+      // If a watcher event was deferred while this refresh was in
+      // flight, run it now (provided the user isn't mid-create).
+      flushPendingWatcherRefresh();
+    }
+  }
+
+  /**
+   * Run any watcher-triggered refresh that was deferred while the user
+   * was typing in the create input. Called from confirmCreate and
+   * cancelCreate after `creating` has been reset.
+   */
+  function flushPendingWatcherRefresh() {
+    if (pendingWatcherRefresh && !creating) {
+      pendingWatcherRefresh = false;
+      // Fire-and-forget — refreshTree handles its own concurrency.
+      refreshTree({ fromWatcher: true });
     }
   }
 
@@ -512,6 +593,7 @@
           }
         }
         if (project) {
+          if (project.session.preview_url) previewUrl.set(project.session.preview_url);
           // Restore expanded directories
           if (project.session.expanded_dirs && project.session.expanded_dirs.length > 0) {
             const dirs = new Set<string>(project.session.expanded_dirs);
@@ -529,21 +611,49 @@
             }
             files = [...files]; // trigger reactivity
           }
-          // Restore terminal panel visibility and spawn terminal tabs
+          // Restore terminal visibility, then refresh terminals so they
+          // start in THIS project's directory (a lingering home/startup
+          // terminal would otherwise keep its old cwd).
           if (project.session.terminal_visible) {
             showTerminal.set(true);
           }
-          if (project.session.terminal_count > 0) {
-            // Signal the terminal component to create tabs (up to saved count)
-            for (let i = 0; i < project.session.terminal_count; i++) {
-              createTerminalSignal.update(s => ({ count: s.count + 1, forceNew: i > 0 }));
-            }
+          if ($showTerminal) {
+            // Resume the terminal in its saved cwd when that dir is still
+            // inside the project (so the backend's cwd validation accepts it);
+            // otherwise fall back to the project root.
+            const savedCwd = project.session.terminal_cwd;
+            pendingTerminalCwd.set(
+              savedCwd && rootPath && savedCwd.startsWith(rootPath) ? savedCwd : null,
+            );
+            resetTerminalSignal.update(n => n + 1);
           }
         }
       } catch (e) {
         log.error('Failed to restore session', e);
       }
     }
+  }
+
+  // Lighter than openFolderByPath: no session save/restore or terminal re-spawn.
+  let followCwdSeq = 0;
+  async function followCwd(path: string) {
+    const seq = ++followCwdSeq;
+    let canonical: string;
+    try {
+      canonical = await invoke<string>('set_project_root', { path });
+    } catch {
+      return; // path vanished or denied — keep the current root
+    }
+    // A newer cd superseded us while awaiting — drop this stale re-root.
+    if (seq !== followCwdSeq) return;
+    if (!shouldFollowCwd(rootPath, canonical)) return;
+    rootPath = canonical;
+    projectRoot.set(canonical);
+    expandedDirs = new Set([canonical]);
+    await loadDirectory(canonical);
+    await fetchGitStatus(false);
+    startWatching(canonical);
+    startGitPolling();
   }
 
   async function openFolder() {
@@ -741,6 +851,13 @@
       selectedPath = fullPath;
       selectedPaths = new Set([fullPath]);
     } catch (e) {
+      // Intentionally do NOT clear `creating` or flush pending refreshes
+      // here: leaving the input visible lets the user fix the name and
+      // retry, or press Escape to cancel. Watcher refreshes stay deferred
+      // until either path runs (confirmCreate-success or cancelCreate),
+      // both of which call flushPendingWatcherRefresh themselves. This
+      // keeps the in-flight input from being unmounted by a tree refresh
+      // while the user is still typing a corrected name.
       createError = `Failed: ${e}`;
       return;
     }
@@ -749,6 +866,7 @@
     createParentPath = null;
     newName = '';
     createError = null;
+    flushPendingWatcherRefresh();
   }
 
   function cancelCreate() {
@@ -756,6 +874,7 @@
     createParentPath = null;
     newName = '';
     createError = null;
+    flushPendingWatcherRefresh();
   }
 
   function handleCreateBlur() {
@@ -937,6 +1056,44 @@
 
   function getParentDir(path: string): string {
     return path.substring(0, path.lastIndexOf('/'));
+  }
+
+  // ── Sticky ancestor breadcrumb (VSCode-style sticky scroll) ──
+  let treeScrollEl = $state<HTMLDivElement>();
+  let stickyPaths = $state<string[]>([]);
+
+  /** Ancestor dirs of `path`, root-first (excludes `path` itself). */
+  function parentChain(path: string): string[] {
+    if (!rootPath) return [];
+    const chain: string[] = [];
+    let p = getParentDir(path);
+    while (p && p.length >= rootPath.length) {
+      chain.unshift(p);
+      if (p === rootPath) break;
+      p = getParentDir(p);
+    }
+    return chain;
+  }
+
+  /** Pin the ancestor folders of the topmost visible row. */
+  function updateSticky() {
+    const el = treeScrollEl;
+    if (!el) return;
+    if (el.scrollTop <= 0) { stickyPaths = []; return; }
+    const rows = el.querySelectorAll<HTMLElement>('.tree-item[data-path]');
+    let topPath: string | null = null;
+    for (const r of rows) {
+      if (r.offsetTop + r.offsetHeight > el.scrollTop) { topPath = r.dataset.path ?? null; break; }
+    }
+    stickyPaths = topPath ? parentChain(topPath) : [];
+  }
+
+  /** Click a pinned ancestor → scroll its real row to the top. */
+  function revealStickyPath(p: string) {
+    const el = treeScrollEl;
+    const row = el?.querySelector<HTMLElement>(`[data-path="${CSS.escape(p)}"]`);
+    if (el && row) el.scrollTop = row.offsetTop;
+    selectedPath = p;
   }
 
   async function moveEntries(paths: string[], destDir: string) {
@@ -1188,6 +1345,12 @@
 
     unlistenDragDrop = await listen<{ paths: string[]; position: { x: number; y: number } }>('tauri://drag-drop', async (event) => {
       if (!rootPath) return;
+      // Drops over a terminal pane are handled by the terminal (insert path); skip import.
+      const { x, y } = event.payload.position;
+      if (document.elementFromPoint(x, y)?.closest('[data-pane-terminal]')) {
+        isExternalDrag = false; externalDropPaths = []; dropTargetPath = null;
+        return;
+      }
       const destDir = dropTargetPath || rootPath;
       const paths = event.payload.paths;
       if (paths.length > 0) {
@@ -1291,9 +1454,31 @@
       <p>Open a project to begin</p>
     </div>
   {:else}
+    {#if stickyPaths.length > 0}
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="sticky-headers">
+        {#each stickyPaths as p, i (p)}
+          <div
+            class="tree-item sticky-row"
+            style="padding-left: {8 + i * 8}px"
+            role="button"
+            tabindex="0"
+            onclick={() => revealStickyPath(p)}
+            onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); revealStickyPath(p); } }}
+          >
+            <span class="chevron expanded"><ChevronRight size={10} /></span>
+            <FolderOpen class="icon dir-icon" />
+            <span class="file-name dir-name">{p.split('/').pop()}</span>
+          </div>
+        {/each}
+      </div>
+    {/if}
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="tree-content"
+      bind:this={treeScrollEl}
+      onscroll={updateSticky}
       onclick={(e) => {
         if (e.target === e.currentTarget) {
           if (creating) cancelCreate();
@@ -1337,12 +1522,13 @@
 {#if contextMenu}
   <div
     class="context-overlay"
+    use:portal
     role="presentation"
     onclick={closeContextMenu}
     onkeydown={(e) => e.key === 'Escape' && closeContextMenu()}
     oncontextmenu={(e) => { e.preventDefault(); closeContextMenu(); }}
   ></div>
-  <div class="context-menu" bind:this={contextMenuEl} style="left: {contextMenu.x}px; top: {contextMenu.y}px">
+  <div class="context-menu" use:portal bind:this={contextMenuEl} style="left: {contextMenu.x}px; top: {contextMenu.y}px">
     {#if selectedPaths.size > 1}
       <button class="context-item" onclick={copyFiles}>
         Copy {selectedPaths.size} items
@@ -1412,6 +1598,9 @@
       {#if !contextMenu!.isDir}
         <button class="context-item" onclick={() => openDiagram(contextMenu!.path)}>
           Show Diagram
+        </button>
+        <button class="context-item" onclick={() => { attachFile(contextMenu!.path); showChat.set(true); contextMenu = null; }}>
+          Attach to AI
         </button>
       {/if}
       <button class="context-item" onclick={() => addToGitignore(contextMenu!.path)}>
@@ -1539,11 +1728,11 @@
 <style>
   .file-tree {
     flex: 1;
+    height: 100%;
     display: flex;
     flex-direction: column;
-    overflow-y: auto;
-    overflow-x: hidden;
-    padding-bottom: 12px;
+    overflow: hidden;
+    font-family: var(--font-sidebar);
   }
 
   .file-tree.refresh-flash {
@@ -1587,6 +1776,23 @@
     flex-direction: column;
     flex: 1;
     min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    position: relative;
+    padding-bottom: 12px;
+  }
+
+  /* Sticky ancestor breadcrumb (VSCode-style sticky scroll) — pinned above
+     the scroll area so the parent folders of the topmost row stay visible. */
+  .sticky-headers {
+    flex-shrink: 0;
+    background: var(--bg-primary);
+    border-bottom: 1px solid var(--border);
+    z-index: 2;
+  }
+  .sticky-row {
+    cursor: pointer;
+    background: var(--bg-primary);
   }
 
   /* Tree items */
@@ -1598,7 +1804,7 @@
     width: 100%;
     text-align: left;
     font-size: 12px;
-    font-weight: 520;
+    font-weight: 600;
     color: var(--text-secondary);
     border-radius: 3px;
     margin: 0 3px;
@@ -1611,9 +1817,7 @@
 
   .tree-item.selected {
     font-weight: 600;
-    border-left: 2px solid var(--settings-icon, #B34B3C);
-    border-radius: 0;
-    background: var(--bg-surface);
+    background: color-mix(in srgb, var(--accent) 20%, transparent);
   }
 
   .tree-item:hover {
@@ -1622,7 +1826,7 @@
   }
 
   .tree-item.selected:hover {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: color-mix(in srgb, var(--accent) 28%, transparent);
   }
 
   /* Chevron */
@@ -1648,9 +1852,10 @@
     flex-shrink: 0;
   }
 
+  /* Folder (outline) icons: soft, light baby blue. */
   :global(.dir-icon) {
-    color: var(--text-secondary);
-    opacity: 0.84;
+    color: #B4DCF0;
+    opacity: 0.8;
   }
 
   .file-indent {
@@ -1671,7 +1876,7 @@
   }
 
   .dir-name {
-    font-weight: 500;
+    font-weight: 600;
     color: var(--text-primary);
   }
 

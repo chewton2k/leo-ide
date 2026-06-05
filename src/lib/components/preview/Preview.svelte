@@ -2,9 +2,10 @@
   import { RefreshCw, Globe, ExternalLink, PictureInPicture2, ShieldAlert } from 'lucide-svelte';
   import { open as openExternal } from '@tauri-apps/plugin-shell';
   import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
-  import { previewUrl, isAllowed, addToAllowList } from '../../modules';
+  import { previewUrl, isAllowed, addToAllowList, PORT_PRESETS, presetUrl, createIdleSuspender, activeFilePath, isPreviewPath } from '../../modules';
   import { log } from '../../modules/logging';
   import { get } from 'svelte/store';
+  import { onDestroy } from 'svelte';
 
   // ── Constants ──────────────────────────────────────────────────
   const STUCK_LOAD_TIMEOUT_MS = 6000;
@@ -38,6 +39,22 @@
    * the prompt.
    */
   let pendingExternalUrl = $state<string | null>(initialAllowed ? null : defaultUrl);
+
+  // ── Idle suspend ───────────────────────────────────────────────
+  // The preview stays mounted (hidden) when another tab is focused, so a
+  // background dev server keeps consuming resources. Suspend (unmount the
+  // iframe) after IDLE_SUSPEND_MS hidden; resume + reload when refocused.
+  let suspended = $state(false);
+  const idleSuspender = createIdleSuspender(() => { if (url) suspended = true; });
+  $effect(() => {
+    if (isPreviewPath($activeFilePath)) {
+      idleSuspender.shown();
+      if (suspended) { suspended = false; nonce++; }
+    } else {
+      idleSuspender.hidden();
+    }
+  });
+  onDestroy(() => idleSuspender.dispose());
 
   // ── Helpers ────────────────────────────────────────────────────
 
@@ -240,6 +257,18 @@
         autocorrect="off"
       />
     </div>
+    <select
+      class="port-preset"
+      title="Quick localhost ports"
+      aria-label="Port presets"
+      onchange={(e) => {
+        const v = e.currentTarget.value;
+        if (v) { inputValue = presetUrl(Number(v)); navigate(); e.currentTarget.selectedIndex = 0; }
+      }}
+    >
+      <option value="">Port…</option>
+      {#each PORT_PRESETS as p (p)}<option value={p}>{p}</option>{/each}
+    </select>
     <button class="bar-btn" onclick={openInPopup} title="Open in Leo window (bypasses iframe restrictions)" aria-label="Open in new window">
       <PictureInPicture2 size={13} />
     </button>
@@ -297,7 +326,7 @@
           </button>
         </div>
       </div>
-    {:else if url}
+    {:else if url && !suspended}
       {#key `${url}#${nonce}`}
         <iframe
           src={url}
@@ -309,6 +338,12 @@
           onload={onLoad}
         ></iframe>
       {/key}
+    {:else if suspended}
+      <div class="empty-state">
+        <Globe size={28} />
+        <p class="empty-title">Preview paused</p>
+        <p class="empty-desc">Suspended while hidden to save resources — reopening reloads it.</p>
+      </div>
     {:else}
       <div class="empty-state">
         <Globe size={28} />
@@ -347,6 +382,17 @@
     flex-shrink: 0;
   }
   .bar-btn:hover { background: var(--bg-surface); color: var(--text-primary); }
+
+  .port-preset {
+    flex-shrink: 0;
+    height: 26px;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    background: var(--bg-surface);
+    color: var(--text-muted);
+    font-size: 11px;
+    padding: 0 4px;
+  }
 
   .url-input-wrap {
     flex: 1;
