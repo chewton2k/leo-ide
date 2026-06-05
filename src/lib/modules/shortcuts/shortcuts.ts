@@ -37,6 +37,11 @@ export const DEFAULT_SHORTCUTS: ShortcutDef[] = [
   { id: 'editor.find',       label: 'Find in file',           group: 'Editor', defaultKeys: 'Meta+KeyF' },
   { id: 'editor.replace',    label: 'Replace in file',        group: 'Editor', defaultKeys: 'Meta+Alt+KeyF' },
   { id: 'editor.goToLine',   label: 'Go to line',             group: 'Editor', defaultKeys: 'Ctrl+KeyG' },
+  { id: 'editor.inlineEdit', label: 'Inline AI edit / ask about selection', group: 'Editor', defaultKeys: 'Meta+KeyK' },
+  // Terminal
+  { id: 'terminal.splitRight', label: 'Split pane right',     group: 'Terminal', defaultKeys: 'Meta+KeyD' },
+  { id: 'terminal.splitDown',  label: 'Split pane down',      group: 'Terminal', defaultKeys: 'Meta+Shift+KeyD' },
+  { id: 'terminal.new',        label: 'New terminal',         group: 'Terminal', defaultKeys: 'Ctrl+Shift+Backquote' },
 ];
 
 const STORAGE_KEY = 'leo-keyboard-shortcuts';
@@ -165,6 +170,9 @@ export const APP_LEVEL_SHORTCUT_IDS = [
   'view.toggleSidebar',
   'view.openSettings',
   'file.search',
+  'terminal.splitRight',
+  'terminal.splitDown',
+  'terminal.new',
 ] as const;
 
 export type AppLevelShortcutId = (typeof APP_LEVEL_SHORTCUT_IDS)[number];

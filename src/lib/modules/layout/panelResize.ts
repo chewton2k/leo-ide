@@ -1,9 +1,8 @@
 /**
- * State machine for the three drag-to-resize gutters in the IDE shell:
+ * State machine for the two drag-to-resize gutters in the IDE shell:
  *
  *   sidebar (left edge of the file tree → editor)
  *   chat    (right edge of the editor → floating chat)
- *   git     (right edge of the editor → git panel)
  *
  * Extracted from `App.svelte` so the host component just owns the
  * three width `$state` cells. The factory returns a `startDrag(target)`
@@ -31,16 +30,14 @@ export interface PanelBounds {
   max: number;
 }
 
-export type PanelTarget = 'sidebar' | 'chat' | 'git';
+export type PanelTarget = 'sidebar' | 'chat';
 
 export interface PanelResizerOptions {
   sidebar: PanelBounds;
   chat: PanelBounds;
-  git: PanelBounds;
   /** Called from rAF; should write the new width to component state. */
   setSidebarWidth: (w: number) => void;
   setChatWidth: (w: number) => void;
-  setGitWidth: (w: number) => void;
   /**
    * Returns the current viewport width. Defaults to `window.innerWidth`
    * but is injectable for testing.
@@ -89,9 +86,6 @@ export function createPanelResizer(opts: PanelResizerOptions): PanelResizer {
         break;
       case 'chat':
         opts.setChatWidth(clamp(viewportWidth() - x, opts.chat.min, opts.chat.max));
-        break;
-      case 'git':
-        opts.setGitWidth(clamp(viewportWidth() - x, opts.git.min, opts.git.max));
         break;
     }
   }

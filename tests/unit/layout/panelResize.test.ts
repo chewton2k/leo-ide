@@ -41,14 +41,12 @@ describe('createPanelResizer', () => {
   let raf: RafQueue;
   let setSidebar: ReturnType<typeof vi.fn>;
   let setChat: ReturnType<typeof vi.fn>;
-  let setGit: ReturnType<typeof vi.fn>;
   let stateChanges: (PanelTarget | null)[];
 
   beforeEach(() => {
     raf = setupSyncRaf();
     setSidebar = vi.fn();
     setChat = vi.fn();
-    setGit = vi.fn();
     stateChanges = [];
   });
 
@@ -61,10 +59,8 @@ describe('createPanelResizer', () => {
     return createPanelResizer({
       sidebar: { min: 100, max: 400 },
       chat: { min: 200, max: 500 },
-      git: { min: 250, max: 600 },
       setSidebarWidth: setSidebar,
       setChatWidth: setChat,
-      setGitWidth: setGit,
       viewportWidth: () => viewportWidth,
       onDragStateChange: (t) => stateChanges.push(t),
     });
@@ -106,17 +102,6 @@ describe('createPanelResizer', () => {
     window.dispatchEvent(new MouseEvent('mousemove', { clientX: 990 }));
     raf.flush();
     expect(setChat).toHaveBeenLastCalledWith(200);
-  });
-
-  it('git drag uses the git bounds independently of chat bounds', () => {
-    const r = build(1000);
-    r.startDrag('git')(new MouseEvent('mousedown'));
-
-    window.dispatchEvent(new MouseEvent('mousemove', { clientX: 600 }));
-    raf.flush();
-    expect(setGit).toHaveBeenCalledWith(400);
-    expect(setChat).not.toHaveBeenCalled();
-    expect(setSidebar).not.toHaveBeenCalled();
   });
 
   it('coalesces multiple mousemoves into a single rAF', () => {

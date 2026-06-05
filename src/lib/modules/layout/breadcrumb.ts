@@ -57,3 +57,44 @@ export function breadcrumbSegmentsFor(
 
   return [{ name: normPath.split('/').pop() || activeFilePath, path: normPath }];
 }
+
+/**
+ * Breadcrumb segments for a terminal's current working directory — ported from
+ * user's home dir (else the drive root on Windows, or `/`); each subsequent
+ * segment carries the absolute path so it can be clicked to navigate.
+ */
+export function cwdBreadcrumbSegments(
+  cwd: string | null | undefined,
+  home: string | null | undefined,
+): BreadcrumbSegment[] {
+  if (!cwd) return [];
+  const normCwd = toPosix(cwd);
+  const normHome = home ? toPosix(home) : null;
+  const usingHome =
+    normHome !== null && (normCwd === normHome || normCwd.startsWith(normHome + '/'));
+
+  let root: BreadcrumbSegment;
+  let tail: string;
+  if (usingHome) {
+    root = { name: '~', path: normHome! };
+    tail = normCwd.slice(normHome!.length).replace(/^\//, '');
+  } else {
+    const drive = /^([A-Za-z]:)(.*)$/.exec(normCwd);
+    if (drive) {
+      root = { name: drive[1], path: drive[1] + '/' };
+      tail = drive[2].replace(/^\//, '');
+    } else {
+      root = { name: '/', path: '/' };
+      tail = normCwd.replace(/^\//, '');
+    }
+  }
+
+  const parts = tail === '' ? [] : tail.split('/').filter(Boolean);
+  const segments: BreadcrumbSegment[] = [root];
+  let acc = root.path;
+  for (const part of parts) {
+    acc = acc.endsWith('/') ? acc + part : acc + '/' + part;
+    segments.push({ name: part, path: acc });
+  }
+  return segments;
+}
