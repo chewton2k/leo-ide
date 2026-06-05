@@ -1,6 +1,8 @@
 pub mod modules;
 
-use modules::{ai, fs, git, graph, knowledge, log as app_log, menu, session, shell, symbols, window_mgr};
+use modules::{
+    ai, fs, git, graph, knowledge, log as app_log, menu, session, shell, symbols, window_mgr,
+};
 use std::sync::Arc;
 use tauri::Manager;
 
@@ -14,8 +16,29 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_drag::init())
+        // NOTE: tauri-plugin-updater is intentionally NOT registered yet — it
+        // panics at startup unless a `plugins.updater` block (endpoints +
+        // signing pubkey) exists in tauri.conf.json. To enable updates: add
+        // that config, then re-add
+        // `.plugin(tauri_plugin_updater::Builder::new().build())` here.
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_denylist(&["settings"])
+                .build(),
+        )
         .manage(terminal_state)
         .manage(project_root_state)
+        .manage(fs::watch::FsWatchState::default())
+        .manage(shell::BackgroundState::default())
+        .manage(shell::session::ShellSessionState::default())
+        .manage(modules::workspace::WorkspaceRegistry::default())
         .manage(Arc::new(ai::AiState::new()))
         .manage(Arc::new(knowledge::KnowledgeState::new()))
         .manage(app_log::LogState::new())
@@ -46,6 +69,10 @@ pub fn run() {
             fs::duplicate_entry,
             fs::reveal_in_file_manager,
             fs::list_all_files,
+            fs::search::fs_grep,
+            fs::search::fs_glob,
+            fs::watch::fs_watch_add,
+            fs::watch::fs_watch_remove,
             // Git
             git::get_git_status,
             git::get_git_remote_status,
@@ -64,6 +91,10 @@ pub fn run() {
             git::git_ahead_behind,
             git::git_diff_line_ranges,
             git::git_log,
+            git::git_commit_graph,
+            git::git_commit_files,
+            git::git_remote_url,
+            git::git_commit_file_diff,
             git::git_list_branches,
             git::git_checkout_branch,
             git::git_resolve_conflict,
@@ -74,10 +105,19 @@ pub fn run() {
             git::find_git_repos,
             // Shell
             shell::spawn_terminal,
+            shell::terminal_ready,
             shell::write_terminal,
             shell::kill_terminal,
+            shell::pty_has_foreground_process,
             shell::resize_terminal,
             shell::run_command_capture,
+            shell::shell_bg_spawn,
+            shell::shell_bg_logs,
+            shell::shell_bg_kill,
+            shell::shell_bg_list,
+            shell::session::shell_session_open,
+            shell::session::shell_session_run,
+            shell::session::shell_session_close,
             // AI
             ai::set_api_key,
             ai::set_provider_key,
@@ -178,6 +218,12 @@ pub fn run() {
                     if let Ok(mut map) = state.0.lock() {
                         map.remove(&label);
                     }
+                }
+                if let Some(state) = window.try_state::<shell::BackgroundState>() {
+                    state.kill_for_window(&label);
+                }
+                if let Some(state) = window.try_state::<fs::watch::FsWatchState>() {
+                    state.release_window(&label);
                 }
             }
         })

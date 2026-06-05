@@ -15,9 +15,17 @@ pub struct KnowledgeState {
     db: Mutex<HashMap<String, Connection>>,
 }
 
+impl Default for KnowledgeState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KnowledgeState {
     pub fn new() -> Self {
-        Self { db: Mutex::new(HashMap::new()) }
+        Self {
+            db: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Remove the cached DB connection for a window. Called on window destroy.
@@ -109,7 +117,10 @@ pub struct IndexProgress {
 // ── DB Path ──
 
 fn knowledge_dir() -> PathBuf {
-    let dir = dirs::home_dir().unwrap_or_default().join(".leo-ide").join("knowledge");
+    let dir = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".leo-ide")
+        .join("knowledge");
     std::fs::create_dir_all(&dir).ok();
     dir
 }
@@ -146,35 +157,47 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
         CREATE TABLE IF NOT EXISTS project_meta (
             key TEXT PRIMARY KEY,
             value TEXT
-        );"
-    ).map_err(|e| format!("Schema init failed: {}", e))?;
+        );",
+    )
+    .map_err(|e| format!("Schema init failed: {}", e))?;
     // Migration: add generation column if missing
     conn.execute_batch(
-        "ALTER TABLE conversations ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;"
-    ).ok(); // Ignore error if column already exists
-    // Migration: add mtime column to files if missing
-    conn.execute_batch(
-        "ALTER TABLE files ADD COLUMN mtime INTEGER NOT NULL DEFAULT 0;"
-    ).ok();
+        "ALTER TABLE conversations ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;",
+    )
+    .ok(); // Ignore error if column already exists
+           // Migration: add mtime column to files if missing
+    conn.execute_batch("ALTER TABLE files ADD COLUMN mtime INTEGER NOT NULL DEFAULT 0;")
+        .ok();
     Ok(())
 }
 
 // ── Cleanup ──
 
 fn cleanup_old_data(conn: &Connection) {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
     let thirty_days_ago = now - (30 * 24 * 60 * 60);
     let seven_days_ago = now - (7 * 24 * 60 * 60);
 
     // Keep only the 50 most recent conversations, delete anything older than 30 days
-    conn.execute("DELETE FROM conversations WHERE updated_at < ?1", params![thirty_days_ago]).ok();
+    conn.execute(
+        "DELETE FROM conversations WHERE updated_at < ?1",
+        params![thirty_days_ago],
+    )
+    .ok();
     conn.execute(
         "DELETE FROM conversations WHERE id NOT IN (SELECT id FROM conversations ORDER BY updated_at DESC LIMIT 50)",
         [],
     ).ok();
 
     // Remove file entries that haven't been re-indexed in 7 days (file was probably deleted)
-    conn.execute("DELETE FROM files WHERE last_indexed < ?1", params![seven_days_ago]).ok();
+    conn.execute(
+        "DELETE FROM files WHERE last_indexed < ?1",
+        params![seven_days_ago],
+    )
+    .ok();
 
     // Vacuum to reclaim space
     conn.execute_batch("VACUUM;").ok();
@@ -209,7 +232,8 @@ pub async fn knowledge_init(
     conn.execute(
         "INSERT OR REPLACE INTO project_meta (key, value) VALUES ('project_root', ?1)",
         params![&project_root],
-    ).map_err(|e| format!("Failed to record project_root: {}", e))?;
+    )
+    .map_err(|e| format!("Failed to record project_root: {}", e))?;
     cleanup_old_data(&conn);
     let mut db = state.db.lock().await;
     db.insert(window.label().to_string(), conn);
@@ -312,25 +336,54 @@ pub async fn knowledge_get_context(
     // 1. Files mentioned by name in query
     for kw in &keywords {
         let pattern = format!("%{}%", kw);
-        let mut stmt = conn.prepare("SELECT path, language, summary, exports FROM files WHERE path LIKE ?1 LIMIT 3").map_err(|e| e.to_string())?;
-        let rows = stmt.query_map(params![pattern], |row| {
-            Ok(FileInfo { path: row.get(0)?, language: row.get(1)?, summary: row.get(2)?, exports: row.get(3)? })
-        }).map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT path, language, summary, exports FROM files WHERE path LIKE ?1 LIMIT 3",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![pattern], |row| {
+                Ok(FileInfo {
+                    path: row.get(0)?,
+                    language: row.get(1)?,
+                    summary: row.get(2)?,
+                    exports: row.get(3)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
         for r in rows.flatten() {
-            if !results.iter().any(|x| x.path == r.path) { results.push(r); }
+            if !results.iter().any(|x| x.path == r.path) {
+                results.push(r);
+            }
         }
     }
 
     // 2. Files in same directory as current file
     if let Some(ref cf) = current_file {
-        let dir = cf.rsplit_once('/').map(|(d, _)| format!("{}/%", d)).unwrap_or_default();
+        let dir = cf
+            .rsplit_once('/')
+            .map(|(d, _)| format!("{}/%", d))
+            .unwrap_or_default();
         if !dir.is_empty() {
-            let mut stmt = conn.prepare("SELECT path, language, summary, exports FROM files WHERE path LIKE ?1 LIMIT 5").map_err(|e| e.to_string())?;
-            let rows = stmt.query_map(params![dir], |row| {
-                Ok(FileInfo { path: row.get(0)?, language: row.get(1)?, summary: row.get(2)?, exports: row.get(3)? })
-            }).map_err(|e| e.to_string())?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT path, language, summary, exports FROM files WHERE path LIKE ?1 LIMIT 5",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![dir], |row| {
+                    Ok(FileInfo {
+                        path: row.get(0)?,
+                        language: row.get(1)?,
+                        summary: row.get(2)?,
+                        exports: row.get(3)?,
+                    })
+                })
+                .map_err(|e| e.to_string())?;
             for r in rows.flatten() {
-                if !results.iter().any(|x| x.path == r.path) { results.push(r); }
+                if !results.iter().any(|x| x.path == r.path) {
+                    results.push(r);
+                }
             }
         }
     }
@@ -339,11 +392,20 @@ pub async fn knowledge_get_context(
     for kw in &keywords {
         let pattern = format!("%{}%", kw);
         let mut stmt = conn.prepare("SELECT path, language, summary, exports FROM files WHERE exports LIKE ?1 OR summary LIKE ?1 LIMIT 3").map_err(|e| e.to_string())?;
-        let rows = stmt.query_map(params![pattern], |row| {
-            Ok(FileInfo { path: row.get(0)?, language: row.get(1)?, summary: row.get(2)?, exports: row.get(3)? })
-        }).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![pattern], |row| {
+                Ok(FileInfo {
+                    path: row.get(0)?,
+                    language: row.get(1)?,
+                    summary: row.get(2)?,
+                    exports: row.get(3)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
         for r in rows.flatten() {
-            if !results.iter().any(|x| x.path == r.path) { results.push(r); }
+            if !results.iter().any(|x| x.path == r.path) {
+                results.push(r);
+            }
         }
     }
 
@@ -367,19 +429,29 @@ pub async fn knowledge_save_conversation(
     validate_knowledge_root(&project_root, window.label(), &root_state).await?;
     let db_p = db_path(&project_root);
     let conn = Connection::open(&db_p).map_err(|e| format!("DB open failed: {}", e))?;
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
     let gen = generation.unwrap_or(0) as i64;
 
     // Check if a newer generation already exists
-    let existing_gen: i64 = conn.query_row(
-        "SELECT COALESCE((SELECT generation FROM conversations WHERE id = ?1), -1)",
-        params![id],
-        |row| row.get(0),
-    ).unwrap_or(-1);
+    let existing_gen: i64 = conn
+        .query_row(
+            "SELECT COALESCE((SELECT generation FROM conversations WHERE id = ?1), -1)",
+            params![id],
+            |row| row.get(0),
+        )
+        .unwrap_or(-1);
 
     if existing_gen >= gen && gen > 0 {
         // Stale write — a newer generation already saved
-        log::warn!("Stale conversation save rejected: id={}, incoming_gen={}, existing_gen={}", id, gen, existing_gen);
+        log::warn!(
+            "Stale conversation save rejected: id={}, incoming_gen={}, existing_gen={}",
+            id,
+            gen,
+            existing_gen
+        );
         return Ok(false);
     }
 
@@ -400,9 +472,16 @@ pub async fn knowledge_list_conversations(
     let db_p = db_path(&project_root);
     let conn = Connection::open(&db_p).map_err(|e| format!("DB open failed: {}", e))?;
     let mut stmt = conn.prepare("SELECT id, title, created_at, updated_at FROM conversations ORDER BY updated_at DESC LIMIT 50").map_err(|e| e.to_string())?;
-    let rows = stmt.query_map([], |row| {
-        Ok(ConversationSummary { id: row.get(0)?, title: row.get(1)?, created_at: row.get(2)?, updated_at: row.get(3)? })
-    }).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(ConversationSummary {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                created_at: row.get(2)?,
+                updated_at: row.get(3)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
     Ok(rows.flatten().collect())
 }
 
@@ -416,8 +495,12 @@ pub async fn knowledge_load_conversation(
     validate_knowledge_root(&project_root, window.label(), &root_state).await?;
     let db_p = db_path(&project_root);
     let conn = Connection::open(&db_p).map_err(|e| format!("DB open failed: {}", e))?;
-    conn.query_row("SELECT messages FROM conversations WHERE id = ?1", params![id], |row| row.get::<_, String>(0))
-        .map_err(|e| format!("Not found: {}", e))
+    conn.query_row(
+        "SELECT messages FROM conversations WHERE id = ?1",
+        params![id],
+        |row| row.get::<_, String>(0),
+    )
+    .map_err(|e| format!("Not found: {}", e))
 }
 
 #[tauri::command]
@@ -429,7 +512,8 @@ pub async fn knowledge_delete_conversations(
     validate_knowledge_root(&project_root, window.label(), &root_state).await?;
     let db_p = db_path(&project_root);
     let conn = Connection::open(&db_p).map_err(|e| format!("DB open failed: {}", e))?;
-    conn.execute("DELETE FROM conversations", []).map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM conversations", [])
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -486,7 +570,9 @@ pub async fn knowledge_list_projects() -> Result<Vec<ProjectInfo>, String> {
         // happily creates missing DBs — this file obviously exists so a
         // normal open is fine. Failures are skipped so one bad DB doesn't
         // poison the whole listing.
-        let Ok(conn) = Connection::open(&path) else { continue };
+        let Ok(conn) = Connection::open(&path) else {
+            continue;
+        };
 
         let project_root: String = conn
             .query_row(
@@ -506,7 +592,9 @@ pub async fn knowledge_list_projects() -> Result<Vec<ProjectInfo>, String> {
         // MAX() on an empty table returns NULL → use a nullable i64 to avoid
         // "Invalid column type" errors on fresh projects.
         let conv_max: Option<i64> = conn
-            .query_row("SELECT MAX(updated_at) FROM conversations", [], |r| r.get(0))
+            .query_row("SELECT MAX(updated_at) FROM conversations", [], |r| {
+                r.get(0)
+            })
             .ok()
             .flatten();
         let files_max: Option<i64> = conn
@@ -528,7 +616,7 @@ pub async fn knowledge_list_projects() -> Result<Vec<ProjectInfo>, String> {
     }
 
     // Most recently touched first.
-    projects.sort_by(|a, b| b.last_updated.cmp(&a.last_updated));
+    projects.sort_by_key(|p| std::cmp::Reverse(p.last_updated));
     Ok(projects)
 }
 
@@ -598,7 +686,9 @@ pub async fn knowledge_delete_by_hash(
     // Clean up sidecars
     for suffix in ["-journal", "-wal", "-shm"] {
         let side = dir.join(format!("{}.db{}", db_hash, suffix));
-        if side.exists() { let _ = std::fs::remove_file(side); }
+        if side.exists() {
+            let _ = std::fs::remove_file(side);
+        }
     }
     Ok(())
 }
@@ -654,7 +744,9 @@ fn validate_admin_db_access(project_root: &str) -> Result<PathBuf, String> {
 /// Verify the calling window is the settings window.
 fn require_settings_window(window: &tauri::WebviewWindow) -> Result<(), String> {
     if window.label() != "settings" {
-        return Err("Access denied: admin commands are only available from the settings window".to_string());
+        return Err(
+            "Access denied: admin commands are only available from the settings window".to_string(),
+        );
     }
     Ok(())
 }
@@ -669,9 +761,16 @@ pub async fn knowledge_admin_list_conversations(
     let db_p = validate_admin_db_access(&project_root)?;
     let conn = Connection::open(&db_p).map_err(|e| format!("DB open failed: {}", e))?;
     let mut stmt = conn.prepare("SELECT id, title, created_at, updated_at FROM conversations ORDER BY updated_at DESC LIMIT 50").map_err(|e| e.to_string())?;
-    let rows = stmt.query_map([], |row| {
-        Ok(ConversationSummary { id: row.get(0)?, title: row.get(1)?, created_at: row.get(2)?, updated_at: row.get(3)? })
-    }).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(ConversationSummary {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                created_at: row.get(2)?,
+                updated_at: row.get(3)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
     Ok(rows.flatten().collect())
 }
 
@@ -685,8 +784,12 @@ pub async fn knowledge_admin_load_conversation(
     require_settings_window(&window)?;
     let db_p = validate_admin_db_access(&project_root)?;
     let conn = Connection::open(&db_p).map_err(|e| format!("DB open failed: {}", e))?;
-    conn.query_row("SELECT messages FROM conversations WHERE id = ?1", params![id], |row| row.get::<_, String>(0))
-        .map_err(|e| format!("Not found: {}", e))
+    conn.query_row(
+        "SELECT messages FROM conversations WHERE id = ?1",
+        params![id],
+        |row| row.get::<_, String>(0),
+    )
+    .map_err(|e| format!("Not found: {}", e))
 }
 
 /// Delete a single conversation — callable only from the settings window.
@@ -713,14 +816,17 @@ pub async fn knowledge_admin_delete_conversations(
     require_settings_window(&window)?;
     let db_p = validate_admin_db_access(&project_root)?;
     let conn = Connection::open(&db_p).map_err(|e| format!("DB open failed: {}", e))?;
-    conn.execute("DELETE FROM conversations", []).map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM conversations", [])
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 // ── Helpers ──
 
 fn walk_files(dir: &Path, skip: &HashSet<&str>, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -730,10 +836,29 @@ fn walk_files(dir: &Path, skip: &HashSet<&str>, files: &mut Vec<PathBuf>) {
             }
         } else {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if matches!(ext, "js"|"jsx"|"ts"|"tsx"|"svelte"|"rs"|"py"|"go"|"java"|"css"|"html"|"json"|"md"|"toml"|"yaml"|"yml"|"sql"|"sh"|"vue") {
-                if path.metadata().map(|m| m.len() < 500_000).unwrap_or(false) {
-                    files.push(path);
-                }
+            if matches!(
+                ext,
+                "js" | "jsx"
+                    | "ts"
+                    | "tsx"
+                    | "svelte"
+                    | "rs"
+                    | "py"
+                    | "go"
+                    | "java"
+                    | "css"
+                    | "html"
+                    | "json"
+                    | "md"
+                    | "toml"
+                    | "yaml"
+                    | "yml"
+                    | "sql"
+                    | "sh"
+                    | "vue"
+            ) && path.metadata().map(|m| m.len() < 500_000).unwrap_or(false)
+            {
+                files.push(path);
             }
         }
     }
@@ -753,7 +878,8 @@ fn detect_lang(path: &Path) -> String {
         Some("json") => "json",
         Some("md") => "markdown",
         _ => "other",
-    }.to_string()
+    }
+    .to_string()
 }
 
 fn extract_summary(content: &str, _lang: &str) -> String {
@@ -763,7 +889,7 @@ fn extract_summary(content: &str, _lang: &str) -> String {
     for line in &lines {
         let t = line.trim();
         if t.starts_with("//") || t.starts_with("#") || t.starts_with("/*") || t.starts_with("*") {
-            summary.push_str(t.trim_start_matches(|c| c == '/' || c == '*' || c == '#' || c == ' '));
+            summary.push_str(t.trim_start_matches(['/', '*', '#', ' ']));
             summary.push(' ');
         }
     }
@@ -778,33 +904,73 @@ fn extract_exports(content: &str, lang: &str) -> String {
     for line in content.lines() {
         let t = line.trim();
         match lang {
-            "javascript" | "typescript" | "svelte" => {
-                if t.starts_with("export ") {
-                    let name = t.split_whitespace().nth(2).or_else(|| t.split_whitespace().nth(1)).unwrap_or("").split('(').next().unwrap_or("").trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_');
-                    if !name.is_empty() && name != "{" { exports.push(name.to_string()); }
+            "javascript" | "typescript" | "svelte" if t.starts_with("export ") => {
+                let name = t
+                    .split_whitespace()
+                    .nth(2)
+                    .or_else(|| t.split_whitespace().nth(1))
+                    .unwrap_or("")
+                    .split('(')
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                if !name.is_empty() && name != "{" {
+                    exports.push(name.to_string());
                 }
             }
             "rust" => {
                 if t.starts_with("pub fn ") || t.starts_with("pub async fn ") {
-                    let name = t.split("fn ").nth(1).unwrap_or("").split('(').next().unwrap_or("").trim();
-                    if !name.is_empty() { exports.push(name.to_string()); }
+                    let name = t
+                        .split("fn ")
+                        .nth(1)
+                        .unwrap_or("")
+                        .split('(')
+                        .next()
+                        .unwrap_or("")
+                        .trim();
+                    if !name.is_empty() {
+                        exports.push(name.to_string());
+                    }
                 } else if t.starts_with("pub struct ") || t.starts_with("pub enum ") {
-                    let name = t.split_whitespace().nth(2).unwrap_or("").split(|c: char| !c.is_alphanumeric() && c != '_').next().unwrap_or("");
-                    if !name.is_empty() { exports.push(name.to_string()); }
+                    let name = t
+                        .split_whitespace()
+                        .nth(2)
+                        .unwrap_or("")
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .next()
+                        .unwrap_or("");
+                    if !name.is_empty() {
+                        exports.push(name.to_string());
+                    }
                 }
             }
             "python" => {
                 if t.starts_with("def ") && !t.starts_with("def _") {
-                    let name = t.trim_start_matches("def ").split('(').next().unwrap_or("").trim();
-                    if !name.is_empty() { exports.push(name.to_string()); }
+                    let name = t
+                        .trim_start_matches("def ")
+                        .split('(')
+                        .next()
+                        .unwrap_or("")
+                        .trim();
+                    if !name.is_empty() {
+                        exports.push(name.to_string());
+                    }
                 } else if t.starts_with("class ") {
-                    let name = t.trim_start_matches("class ").split(|c: char| !c.is_alphanumeric() && c != '_').next().unwrap_or("");
-                    if !name.is_empty() { exports.push(name.to_string()); }
+                    let name = t
+                        .trim_start_matches("class ")
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .next()
+                        .unwrap_or("");
+                    if !name.is_empty() {
+                        exports.push(name.to_string());
+                    }
                 }
             }
             _ => {}
         }
-        if exports.len() >= 20 { break; }
+        if exports.len() >= 20 {
+            break;
+        }
     }
     exports.join(", ")
 }

@@ -65,5 +65,7 @@ pub fn open_folder_in_new_window(app: AppHandle, path: String) -> Result<String,
 
 #[tauri::command]
 pub fn close_focused_window(window: tauri::WebviewWindow) -> Result<(), String> {
-    window.close().map_err(|e| format!("failed to close window: {e}"))
+    window
+        .close()
+        .map_err(|e| format!("failed to close window: {e}"))
 }

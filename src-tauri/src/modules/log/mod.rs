@@ -6,11 +6,19 @@ use std::sync::Mutex;
 
 const MAX_LOG_SIZE: u64 = 5 * 1024 * 1024; // 5 MB
 const MAX_HISTORY_FILES: usize = 10;
-const SECRET_PATTERN: &[&str] = &["api_key", "apikey", "api-key", "token", "password", "secret"];
+const SECRET_PATTERN: &[&str] = &[
+    "api_key", "apikey", "api-key", "token", "password", "secret",
+];
 
 pub struct LogState {
     writer: Mutex<Option<BufWriter<File>>>,
     log_path: PathBuf,
+}
+
+impl Default for LogState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LogState {
@@ -44,13 +52,15 @@ fn open_log_file(path: &PathBuf) -> Option<BufWriter<File>> {
 }
 
 fn prune_old_logs(log_dir: &PathBuf) {
-    let Ok(entries) = fs::read_dir(log_dir) else { return };
+    let Ok(entries) = fs::read_dir(log_dir) else {
+        return;
+    };
     let mut log_files: Vec<PathBuf> = entries
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| {
-            p.extension().map_or(false, |ext| ext == "jsonl")
-                && p.file_name().map_or(false, |n| n != "leo.jsonl")
+            p.extension().is_some_and(|ext| ext == "jsonl")
+                && p.file_name().is_some_and(|n| n != "leo.jsonl")
         })
         .collect();
     if log_files.len() <= MAX_HISTORY_FILES {
@@ -86,7 +96,11 @@ fn rotate_if_needed(state: &LogState) {
     *guard = open_log_file(&state.log_path);
 
     // Prune in background
-    let log_dir = state.log_path.parent().unwrap_or(&state.log_path).to_path_buf();
+    let log_dir = state
+        .log_path
+        .parent()
+        .unwrap_or(&state.log_path)
+        .to_path_buf();
     std::thread::spawn(move || prune_old_logs(&log_dir));
 }
 
@@ -96,7 +110,7 @@ fn redact_value(s: &str) -> String {
     for pattern in SECRET_PATTERN {
         // Match keys like "apiKey":"value" or "api_key":"value"
         let search = format!("\"{}\"", pattern);
-        if let Some(_) = result.to_lowercase().find(&search.to_lowercase()) {
+        if result.to_lowercase().find(&search.to_lowercase()).is_some() {
             // Use regex-free approach: find the key, skip to value, replace
             if let Some(redacted) = redact_json_key(&result, pattern) {
                 result = redacted;
@@ -125,9 +139,15 @@ fn redact_json_key(json: &str, key_pattern: &str) -> Option<String> {
                 let str_start = trim_offset + 1;
                 let mut i = str_start;
                 while i < result.len() {
-                    if result.as_bytes()[i] == b'"' && (i == str_start || result.as_bytes()[i - 1] != b'\\') {
+                    if result.as_bytes()[i] == b'"'
+                        && (i == str_start || result.as_bytes()[i - 1] != b'\\')
+                    {
                         // Replace value
-                        result = format!("{}\"[redacted]\"{}", &result[..trim_offset], &result[i + 1..]);
+                        result = format!(
+                            "{}\"[redacted]\"{}",
+                            &result[..trim_offset],
+                            &result[i + 1..]
+                        );
                         break;
                     }
                     i += 1;

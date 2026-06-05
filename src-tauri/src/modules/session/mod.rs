@@ -21,6 +21,12 @@ pub struct SessionData {
     /// Expanded directory paths in the file tree.
     #[serde(default)]
     pub expanded_dirs: Vec<String>,
+    /// The web-preview URL to restore.
+    #[serde(default)]
+    pub preview_url: Option<String>,
+    /// Working directory the active terminal was left in (resumed on open).
+    #[serde(default)]
+    pub terminal_cwd: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -144,11 +144,7 @@ pub fn put(
 
 /// One-shot remove for a single provider. Drops the file when the last
 /// entry is removed so we don't leave an empty encrypted blob behind.
-pub fn remove(
-    base_dir: &Path,
-    file_key: &[u8; KEY_SIZE],
-    provider: &str,
-) -> Result<(), String> {
+pub fn remove(base_dir: &Path, file_key: &[u8; KEY_SIZE], provider: &str) -> Result<(), String> {
     let mut map = match read_all(base_dir, file_key) {
         Ok(m) => m,
         // Corrupted / unreadable: remove the file outright so we recover

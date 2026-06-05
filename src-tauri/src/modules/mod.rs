@@ -9,3 +9,4 @@ pub mod session;
 pub mod shell;
 pub mod symbols;
 pub mod window_mgr;
+pub mod workspace;

@@ -6,7 +6,7 @@
 
 use serde::Serialize;
 use std::path::Path;
-use tree_sitter::{Language, Parser, Node};
+use tree_sitter::{Language, Node, Parser};
 
 use crate::modules::fs::ProjectRootState;
 
@@ -60,14 +60,22 @@ fn collect_symbols(node: Node, source: &str, ext: &str, symbols: &mut Vec<Symbol
     let is_symbol = match ext {
         "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" => matches!(
             kind,
-            "function_declaration" | "class_declaration" | "method_definition"
-            | "arrow_function" | "interface_declaration" | "type_alias_declaration"
-            | "export_statement"
+            "function_declaration"
+                | "class_declaration"
+                | "method_definition"
+                | "arrow_function"
+                | "interface_declaration"
+                | "type_alias_declaration"
+                | "export_statement"
         ),
         "rs" => matches!(
             kind,
-            "function_item" | "impl_item" | "struct_item" | "enum_item"
-            | "trait_item" | "type_item"
+            "function_item"
+                | "impl_item"
+                | "struct_item"
+                | "enum_item"
+                | "trait_item"
+                | "type_item"
         ),
         "py" | "pyi" => matches!(kind, "function_definition" | "class_definition"),
         _ => false,
@@ -82,8 +90,11 @@ fn collect_symbols(node: Node, source: &str, ext: &str, symbols: &mut Vec<Symbol
     // Recurse into children (but not into function bodies — we already captured them)
     let dominated = matches!(
         kind,
-        "function_declaration" | "function_item" | "function_definition"
-        | "method_definition" | "arrow_function"
+        "function_declaration"
+            | "function_item"
+            | "function_definition"
+            | "method_definition"
+            | "arrow_function"
     );
     if !dominated {
         let mut cursor = node.walk();
@@ -101,14 +112,24 @@ fn extract_single(node: Node, source: &str, ext: &str) -> Option<Symbol> {
     let body = node.utf8_text(source.as_bytes()).ok()?.to_string();
 
     // Skip very short symbols (likely noise)
-    if body.len() < 10 { return None; }
+    if body.len() < 10 {
+        return None;
+    }
 
-    Some(Symbol { name, kind: kind_str.to_string(), start_line, end_line, body })
+    Some(Symbol {
+        name,
+        kind: kind_str.to_string(),
+        start_line,
+        end_line,
+        body,
+    })
 }
 
 fn normalize_kind(kind: &str, _ext: &str) -> &'static str {
     match kind {
-        "function_declaration" | "function_item" | "function_definition" | "arrow_function" => "function",
+        "function_declaration" | "function_item" | "function_definition" | "arrow_function" => {
+            "function"
+        }
         "class_declaration" | "class_definition" => "class",
         "method_definition" => "method",
         "interface_declaration" => "interface",
@@ -122,6 +143,7 @@ fn normalize_kind(kind: &str, _ext: &str) -> &'static str {
     }
 }
 
+#[allow(clippy::only_used_in_recursion)]
 fn find_name(node: Node, source: &str, ext: &str) -> Option<String> {
     // For export statements, look inside for the actual declaration
     if node.kind() == "export_statement" {
@@ -139,10 +161,16 @@ fn find_name(node: Node, source: &str, ext: &str) -> Option<String> {
     for child in node.children(&mut cursor) {
         match child.kind() {
             "identifier" | "type_identifier" | "property_identifier" => {
-                return child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+                return child
+                    .utf8_text(source.as_bytes())
+                    .ok()
+                    .map(|s| s.to_string());
             }
             "name" => {
-                return child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+                return child
+                    .utf8_text(source.as_bytes())
+                    .ok()
+                    .map(|s| s.to_string());
             }
             _ => {}
         }
@@ -172,8 +200,8 @@ pub fn symbols_extract(
         return Err("Access denied: path is outside the project".into());
     }
 
-    let source = std::fs::read_to_string(&file_path)
-        .map_err(|e| format!("Failed to read file: {e}"))?;
+    let source =
+        std::fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {e}"))?;
 
     let ext = Path::new(&path)
         .extension()
@@ -215,7 +243,9 @@ function hello(name) {
 const add = (a, b) => a + b;
 "#;
         let symbols = extract_symbols(source, "js");
-        assert!(symbols.iter().any(|s| s.name == "hello" && s.kind == "function"));
+        assert!(symbols
+            .iter()
+            .any(|s| s.name == "hello" && s.kind == "function"));
     }
 
     #[test]
@@ -233,8 +263,12 @@ class UserService {
 }
 "#;
         let symbols = extract_symbols(source, "ts");
-        assert!(symbols.iter().any(|s| s.name == "User" && s.kind == "interface"));
-        assert!(symbols.iter().any(|s| s.name == "UserService" && s.kind == "class"));
+        assert!(symbols
+            .iter()
+            .any(|s| s.name == "User" && s.kind == "interface"));
+        assert!(symbols
+            .iter()
+            .any(|s| s.name == "UserService" && s.kind == "class"));
     }
 
     #[test]
@@ -250,8 +284,12 @@ pub fn process(config: &Config) -> String {
 }
 "#;
         let symbols = extract_symbols(source, "rs");
-        assert!(symbols.iter().any(|s| s.name == "Config" && s.kind == "struct"));
-        assert!(symbols.iter().any(|s| s.name == "process" && s.kind == "function"));
+        assert!(symbols
+            .iter()
+            .any(|s| s.name == "Config" && s.kind == "struct"));
+        assert!(symbols
+            .iter()
+            .any(|s| s.name == "process" && s.kind == "function"));
     }
 
     #[test]
@@ -265,8 +303,12 @@ class Calculator:
         return a + b
 "#;
         let symbols = extract_symbols(source, "py");
-        assert!(symbols.iter().any(|s| s.name == "greet" && s.kind == "function"));
-        assert!(symbols.iter().any(|s| s.name == "Calculator" && s.kind == "class"));
+        assert!(symbols
+            .iter()
+            .any(|s| s.name == "greet" && s.kind == "function"));
+        assert!(symbols
+            .iter()
+            .any(|s| s.name == "Calculator" && s.kind == "class"));
     }
 
     #[test]

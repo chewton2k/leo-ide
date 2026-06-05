@@ -7,6 +7,35 @@ use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+pub mod search;
+pub mod watch;
+
+pub(crate) fn to_canon(p: impl AsRef<Path>) -> String {
+    let s = p.as_ref().to_string_lossy();
+    #[cfg(windows)]
+    {
+        let stripped = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{rest}")
+        } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+            rest.to_string()
+        } else {
+            s.into_owned()
+        };
+        stripped.replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        s.into_owned()
+    }
+}
+
+pub(crate) fn is_within_any_root(state: &ProjectRootState, path: &Path) -> bool {
+    let map = state.blocking_read();
+    map.values()
+        .filter_map(|opt| opt.as_ref())
+        .any(|root| path.starts_with(root))
+}
+
 /// Per-window project root. Each Tauri window has its own entry,
 /// keyed by `WebviewWindow::label()`. The outer RwLock guards the map;
 /// inner Option holds the per-window root.
@@ -192,7 +221,9 @@ fn read_dir_recursive(
         // symlinks fall back to "treat as file" so they're visible
         // without crashing the walk.
         let is_dir = if is_symlink {
-            fs::metadata(&file_path).map(|m| m.is_dir()).unwrap_or(false)
+            fs::metadata(&file_path)
+                .map(|m| m.is_dir())
+                .unwrap_or(false)
         } else {
             ft.is_dir()
         };
@@ -241,7 +272,11 @@ pub fn read_file_content(
     validate_path(&path, window.label(), &state)?;
     let meta = fs::metadata(&path).map_err(|e| format!("Failed to read file: {}", e.kind()))?;
     if meta.len() > MAX_TEXT_FILE_BYTES {
-        return Err(format!("FILE_TOO_LARGE: {} bytes; limit {}", meta.len(), MAX_TEXT_FILE_BYTES));
+        return Err(format!(
+            "FILE_TOO_LARGE: {} bytes; limit {}",
+            meta.len(),
+            MAX_TEXT_FILE_BYTES
+        ));
     }
     fs::read_to_string(&path).map_err(|e| format!("Failed to read file: {}", e.kind()))
 }
@@ -255,7 +290,11 @@ pub fn write_file_content(
 ) -> Result<(), String> {
     validate_path(&path, window.label(), &state)?;
     if content.len() as u64 > MAX_TEXT_FILE_BYTES {
-        return Err(format!("CONTENT_TOO_LARGE: {} bytes; limit {}", content.len(), MAX_TEXT_FILE_BYTES));
+        return Err(format!(
+            "CONTENT_TOO_LARGE: {} bytes; limit {}",
+            content.len(),
+            MAX_TEXT_FILE_BYTES
+        ));
     }
     fs::write(&path, &content).map_err(|e| format!("Failed to write file: {}", e.kind()))
 }
@@ -269,7 +308,11 @@ pub fn read_file_binary(
     validate_path(&path, window.label(), &state)?;
     let meta = fs::metadata(&path).map_err(|e| format!("Failed to read file: {}", e.kind()))?;
     if meta.len() > MAX_BINARY_FILE_BYTES {
-        return Err(format!("FILE_TOO_LARGE: {} bytes; limit {}", meta.len(), MAX_BINARY_FILE_BYTES));
+        return Err(format!(
+            "FILE_TOO_LARGE: {} bytes; limit {}",
+            meta.len(),
+            MAX_BINARY_FILE_BYTES
+        ));
     }
     let bytes = fs::read(&path).map_err(|e| format!("Failed to read file: {}", e.kind()))?;
     Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
@@ -290,7 +333,11 @@ pub fn create_project_dir(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn create_file(window: tauri::WebviewWindow, state: tauri::State<'_, ProjectRootState>, path: String) -> Result<(), String> {
+pub fn create_file(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, ProjectRootState>,
+    path: String,
+) -> Result<(), String> {
     validate_path(&path, window.label(), &state)?;
     let p = PathBuf::from(&path);
     if p.exists() {
@@ -416,8 +463,15 @@ pub fn import_external_files(
             .ok_or_else(|| format!("Invalid source path: {}", src))?;
         let mut target = dest.join(file_name);
         if target.exists() {
-            let stem = target.file_stem().unwrap_or_default().to_string_lossy().to_string();
-            let ext = target.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+            let stem = target
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let ext = target
+                .extension()
+                .map(|e| format!(".{}", e.to_string_lossy()))
+                .unwrap_or_default();
             target = next_copy_name(&dest, &stem, &ext, src_path.is_dir())?;
         }
         if src_path.is_dir() {
@@ -452,8 +506,15 @@ pub fn paste_entries(
             .ok_or_else(|| format!("Invalid source path: {}", src))?;
         let mut target = dest.join(file_name);
         if target.exists() {
-            let stem = target.file_stem().unwrap_or_default().to_string_lossy().to_string();
-            let ext = target.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+            let stem = target
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let ext = target
+                .extension()
+                .map(|e| format!(".{}", e.to_string_lossy()))
+                .unwrap_or_default();
             target = next_copy_name(&dest, &stem, &ext, src_path.is_dir())?;
         }
         if src_path.is_dir() {
@@ -478,12 +539,19 @@ pub fn duplicate_entry(
         return Err("Path does not exist".to_string());
     }
     let parent = src_path.parent().ok_or("No parent directory")?;
-    let stem = src_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+    let stem = src_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
     let is_dir = src_path.is_dir();
     let ext = if is_dir {
         String::new()
     } else {
-        src_path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default()
+        src_path
+            .extension()
+            .map(|e| format!(".{}", e.to_string_lossy()))
+            .unwrap_or_default()
     };
 
     let target = next_copy_name(parent, &stem, &ext, is_dir)?;
@@ -615,7 +683,6 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>, depth: u32) {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -713,15 +780,20 @@ mod tests {
         symlink(&target, &link).unwrap();
 
         let mut visited = std::collections::HashSet::new();
-        let entries =
-            read_dir_recursive(dir.path(), 0, 5, &mut visited).expect("walk");
+        let entries = read_dir_recursive(dir.path(), 0, 5, &mut visited).expect("walk");
 
         let real = find(&entries, "real.txt").expect("real entry present");
-        assert!(!real.is_symlink, "regular file must not be flagged as symlink");
+        assert!(
+            !real.is_symlink,
+            "regular file must not be flagged as symlink"
+        );
 
         let link_entry = find(&entries, "link.txt").expect("symlink entry present");
         assert!(link_entry.is_symlink, "symlink must be flagged");
-        assert!(!link_entry.is_dir, "symlink to file must report is_dir=false");
+        assert!(
+            !link_entry.is_dir,
+            "symlink to file must report is_dir=false"
+        );
         assert!(link_entry.children.is_none());
     }
 
@@ -738,8 +810,7 @@ mod tests {
         symlink(&real_dir, &link_dir).unwrap();
 
         let mut visited = std::collections::HashSet::new();
-        let entries =
-            read_dir_recursive(dir.path(), 0, 5, &mut visited).expect("walk");
+        let entries = read_dir_recursive(dir.path(), 0, 5, &mut visited).expect("walk");
 
         let real = find(&entries, "real_dir").expect("real_dir present");
         assert!(real.is_dir);
@@ -748,7 +819,10 @@ mod tests {
         assert_eq!(real.children.as_ref().map(|c| c.len()), Some(1));
 
         let linked = find(&entries, "link_dir").expect("link_dir present");
-        assert!(linked.is_dir, "symlink to directory should report is_dir=true");
+        assert!(
+            linked.is_dir,
+            "symlink to directory should report is_dir=true"
+        );
         assert!(linked.is_symlink);
         // Symlinked directory shows up but children is empty: we do
         // not recurse into the link target through the recursive walk.
@@ -777,8 +851,7 @@ mod tests {
         symlink(&parent, &cycle_link).unwrap();
 
         let mut visited = std::collections::HashSet::new();
-        let entries =
-            read_dir_recursive(&parent, 0, 5, &mut visited).expect("walk");
+        let entries = read_dir_recursive(&parent, 0, 5, &mut visited).expect("walk");
 
         // The walk completes (no infinite loop) and reports the link.
         let loop_entry = find(&entries, "loop").expect("loop entry present");
@@ -799,8 +872,7 @@ mod tests {
         symlink(Path::new("/no/such/path/leo-dangling-target"), &link).unwrap();
 
         let mut visited = std::collections::HashSet::new();
-        let entries =
-            read_dir_recursive(dir.path(), 0, 5, &mut visited).expect("walk");
+        let entries = read_dir_recursive(dir.path(), 0, 5, &mut visited).expect("walk");
 
         let dangling = find(&entries, "dangling").expect("dangling entry present");
         assert!(dangling.is_symlink);

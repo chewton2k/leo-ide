@@ -106,8 +106,14 @@ fn a5_window_destroy_kills_terminals_for_that_window_only() {
     {
         let mut managers = state.lock().unwrap();
         // Simulate two windows having terminal managers
-        managers.insert("main".to_string(), app_lib::modules::shell::TerminalManager::new());
-        managers.insert("win-2".to_string(), app_lib::modules::shell::TerminalManager::new());
+        managers.insert(
+            "main".to_string(),
+            app_lib::modules::shell::TerminalManager::new(),
+        );
+        managers.insert(
+            "win-2".to_string(),
+            app_lib::modules::shell::TerminalManager::new(),
+        );
     }
 
     // Simulate destroy of win-2

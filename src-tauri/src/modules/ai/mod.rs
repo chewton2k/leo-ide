@@ -8,6 +8,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 
 mod key_store;
+mod ssrf;
 
 /// Shared HTTP client for non-streaming requests (with timeout).
 fn http_client() -> &'static reqwest::Client {
@@ -21,20 +22,6 @@ fn http_client() -> &'static reqwest::Client {
             .timeout(Duration::from_secs(120))
             .build()
             .expect("reqwest client build")
-    })
-}
-
-/// Shared HTTP client for streaming requests (no overall timeout).
-fn http_client_streaming() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .pool_idle_timeout(Some(Duration::from_secs(90)))
-            .pool_max_idle_per_host(4)
-            .tcp_keepalive(Some(Duration::from_secs(30)))
-            .connect_timeout(Duration::from_secs(15))
-            .build()
-            .expect("reqwest streaming client build")
     })
 }
 
@@ -260,7 +247,8 @@ pub struct StreamChunk {
     pub tool_calls: Option<Value>,
 }
 
-const SYSTEM_PROMPT: &str = "You are an AI coding assistant embedded in a lightweight IDE called leo. \
+const SYSTEM_PROMPT: &str =
+    "You are an AI coding assistant embedded in a lightweight IDE called leo. \
     Help the user with their code: explain, debug, refactor, or write new code. \
     Keep responses concise and code-focused.";
 
@@ -268,6 +256,12 @@ const SYSTEM_PROMPT: &str = "You are an AI coding assistant embedded in a lightw
 
 pub struct AiState {
     pub cancel_tokens: Mutex<std::collections::HashMap<String, tokio::sync::watch::Sender<bool>>>,
+}
+
+impl Default for AiState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AiState {
@@ -282,21 +276,36 @@ impl AiState {
 
 #[tauri::command]
 pub async fn ai_chat(request: AiRequest) -> Result<String, String> {
-    let provider = request.provider.clone().unwrap_or_else(|| "openrouter".to_string()).to_lowercase();
+    let provider = request
+        .provider
+        .clone()
+        .unwrap_or_else(|| "openrouter".to_string())
+        .to_lowercase();
     let api_key = if provider == "local" {
         get_key(&provider)?.unwrap_or_else(|| "http://localhost:11434".to_string())
     } else {
-        get_key(&provider)?.ok_or_else(|| format!("No API key configured for {}.", display_provider(&provider)))?
+        get_key(&provider)?
+            .ok_or_else(|| format!("No API key configured for {}.", display_provider(&provider)))?
     };
 
     let user_content = match &request.context {
-        Some(ctx) if !ctx.is_empty() => format!("Code context:\n```\n{}\n```\n\n{}", ctx, request.prompt),
+        Some(ctx) if !ctx.is_empty() => {
+            format!("Code context:\n```\n{}\n```\n\n{}", ctx, request.prompt)
+        }
         _ => request.prompt.clone(),
     };
 
     let messages = vec![
-        ChatMessageInput { role: "system".into(), content: SYSTEM_PROMPT.into(), tool_call_id: None },
-        ChatMessageInput { role: "user".into(), content: user_content, tool_call_id: None },
+        ChatMessageInput {
+            role: "system".into(),
+            content: SYSTEM_PROMPT.into(),
+            tool_call_id: None,
+        },
+        ChatMessageInput {
+            role: "user".into(),
+            content: user_content,
+            tool_call_id: None,
+        },
     ];
 
     let model = request.model.unwrap_or_else(|| default_model(&provider));
@@ -311,11 +320,16 @@ pub async fn ai_chat_stream(
     app: AppHandle,
     state: tauri::State<'_, Arc<AiState>>,
 ) -> Result<(), String> {
-    let provider = request.provider.clone().unwrap_or_else(|| "openrouter".to_string()).to_lowercase();
+    let provider = request
+        .provider
+        .clone()
+        .unwrap_or_else(|| "openrouter".to_string())
+        .to_lowercase();
     let api_key = if provider == "local" {
         get_key(&provider)?.unwrap_or_else(|| "http://localhost:11434".to_string())
     } else {
-        get_key(&provider)?.ok_or_else(|| format!("No API key configured for {}.", display_provider(&provider)))?
+        get_key(&provider)?
+            .ok_or_else(|| format!("No API key configured for {}.", display_provider(&provider)))?
     };
     let model = request.model.unwrap_or_else(|| default_model(&provider));
     let session_id = request.session_id.clone();
@@ -332,7 +346,17 @@ pub async fn ai_chat_stream(
     let sid = session_id.clone();
 
     tokio::spawn(async move {
-        let result = stream_response(&provider, &api_key, &model, &request.messages, &tools, &app, &sid, cancel_rx).await;
+        let result = stream_response(
+            &provider,
+            &api_key,
+            &model,
+            &request.messages,
+            &tools,
+            &app,
+            &sid,
+            cancel_rx,
+        )
+        .await;
 
         // Clean up cancel token
         {
@@ -343,11 +367,35 @@ pub async fn ai_chat_stream(
         // Emit done or error
         match result {
             Ok(()) => {
-                let _ = app.emit("ai-stream-chunk", StreamChunk { session_id: sid, delta: String::new(), done: true, tool_calls: None });
+                let _ = app.emit(
+                    "ai-stream-chunk",
+                    StreamChunk {
+                        session_id: sid,
+                        delta: String::new(),
+                        done: true,
+                        tool_calls: None,
+                    },
+                );
             }
             Err(e) => {
-                let _ = app.emit("ai-stream-chunk", StreamChunk { session_id: sid.clone(), delta: format!("Error: {}", e), done: false, tool_calls: None });
-                let _ = app.emit("ai-stream-chunk", StreamChunk { session_id: sid, delta: String::new(), done: true, tool_calls: None });
+                let _ = app.emit(
+                    "ai-stream-chunk",
+                    StreamChunk {
+                        session_id: sid.clone(),
+                        delta: format!("Error: {}", e),
+                        done: false,
+                        tool_calls: None,
+                    },
+                );
+                let _ = app.emit(
+                    "ai-stream-chunk",
+                    StreamChunk {
+                        session_id: sid,
+                        delta: String::new(),
+                        done: true,
+                        tool_calls: None,
+                    },
+                );
             }
         }
     });
@@ -369,6 +417,7 @@ pub async fn ai_chat_cancel(
 
 // ── Streaming implementation ──
 
+#[allow(clippy::too_many_arguments)]
 async fn stream_response(
     provider: &str,
     api_key: &str,
@@ -380,8 +429,7 @@ async fn stream_response(
     mut cancel_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), String> {
     let (url, headers, body) = build_stream_request(provider, api_key, model, messages, tools)?;
-
-    let client = http_client_streaming();
+    let client = ssrf::guarded_client(&url, provider == "local").await?;
     let mut req = client.post(&url);
     for (k, v) in &headers {
         req = req.header(k.as_str(), v.as_str());
@@ -416,8 +464,7 @@ async fn stream_response(
                             return Err("SSE buffer overflow: no newline in 1MB of data".to_string());
                         }
 
-                        loop {
-                            let Some(line_end) = buffer.iter().position(|&b| b == b'\n') else { break };
+                        while let Some(line_end) = buffer.iter().position(|&b| b == b'\n') {
                             let line_bytes = &buffer[..line_end];
                             let line_bytes = line_bytes.strip_suffix(b"\r").unwrap_or(line_bytes);
                             let line = String::from_utf8_lossy(line_bytes);
@@ -473,13 +520,16 @@ fn serialize_message(m: &ChatMessageInput) -> Value {
     msg
 }
 
+/// (url, headers, body) for an upstream chat-completions request.
+type StreamRequest = (String, Vec<(String, String)>, String);
+
 fn build_stream_request(
     provider: &str,
     api_key: &str,
     model: &str,
     messages: &[ChatMessageInput],
     tools: &Option<Value>,
-) -> Result<(String, Vec<(String, String)>, String), String> {
+) -> Result<StreamRequest, String> {
     match provider {
         "anthropic" => {
             let url = "https://api.anthropic.com/v1/messages".to_string();
@@ -489,8 +539,16 @@ fn build_stream_request(
                 ("content-type".into(), "application/json".into()),
             ];
             // Separate system message
-            let system = messages.iter().find(|m| m.role == "system").map(|m| m.content.clone()).unwrap_or_default();
-            let msgs: Vec<Value> = messages.iter().filter(|m| m.role != "system").map(|m| serialize_message(m)).collect();
+            let system = messages
+                .iter()
+                .find(|m| m.role == "system")
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+            let msgs: Vec<Value> = messages
+                .iter()
+                .filter(|m| m.role != "system")
+                .map(serialize_message)
+                .collect();
             let mut body = json!({
                 "model": model,
                 "max_tokens": 4096,
@@ -501,14 +559,17 @@ fn build_stream_request(
             // Add tools if provided (convert from OpenAI format to Anthropic format)
             if let Some(tools_val) = tools {
                 if let Some(tools_arr) = tools_val.as_array() {
-                    let anthropic_tools: Vec<Value> = tools_arr.iter().filter_map(|t| {
-                        let func = t.get("function")?;
-                        Some(json!({
-                            "name": func.get("name")?,
-                            "description": func.get("description")?,
-                            "input_schema": func.get("parameters")?
-                        }))
-                    }).collect();
+                    let anthropic_tools: Vec<Value> = tools_arr
+                        .iter()
+                        .filter_map(|t| {
+                            let func = t.get("function")?;
+                            Some(json!({
+                                "name": func.get("name")?,
+                                "description": func.get("description")?,
+                                "input_schema": func.get("parameters")?
+                            }))
+                        })
+                        .collect();
                     if !anthropic_tools.is_empty() {
                         body["tools"] = json!(anthropic_tools);
                     }
@@ -535,8 +596,12 @@ fn build_stream_request(
                     ("content-type".into(), "application/json".into()),
                 ]
             };
-            let msgs: Vec<Value> = messages.iter().map(|m| serialize_message(m)).collect();
-            let token_field = if provider == "openai" { "max_completion_tokens" } else { "max_tokens" };
+            let msgs: Vec<Value> = messages.iter().map(serialize_message).collect();
+            let token_field = if provider == "openai" {
+                "max_completion_tokens"
+            } else {
+                "max_tokens"
+            };
             let mut body = json!({
                 "model": model,
                 token_field: 4096,
@@ -556,7 +621,8 @@ fn extract_stream_delta(parsed: &Value, provider: &str) -> String {
     match provider {
         "anthropic" => {
             // Anthropic: {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}
-            parsed.get("delta")
+            parsed
+                .get("delta")
                 .and_then(|d| d.get("text"))
                 .and_then(|t| t.as_str())
                 .unwrap_or("")
@@ -564,7 +630,8 @@ fn extract_stream_delta(parsed: &Value, provider: &str) -> String {
         }
         _ => {
             // OpenAI: {"choices":[{"delta":{"content":"..."}}]}
-            parsed.get("choices")
+            parsed
+                .get("choices")
                 .and_then(|c| c.get(0))
                 .and_then(|c| c.get("delta"))
                 .and_then(|d| d.get("content"))
@@ -599,7 +666,10 @@ fn extract_tool_calls(parsed: &Value, provider: &str) -> Option<Value> {
                 "content_block_delta" => {
                     let delta = parsed.get("delta")?;
                     if delta.get("type").and_then(|t| t.as_str()) == Some("input_json_delta") {
-                        let partial = delta.get("partial_json").and_then(|p| p.as_str()).unwrap_or("");
+                        let partial = delta
+                            .get("partial_json")
+                            .and_then(|p| p.as_str())
+                            .unwrap_or("");
                         // We need the block index to correlate — use a placeholder id
                         let idx = parsed.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
                         Some(json!([{
@@ -616,7 +686,8 @@ fn extract_tool_calls(parsed: &Value, provider: &str) -> Option<Value> {
         }
         _ => {
             // OpenAI: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"...","type":"function","function":{"name":"...","arguments":"..."}}]}}]}
-            parsed.get("choices")
+            parsed
+                .get("choices")
                 .and_then(|c| c.get(0))
                 .and_then(|c| c.get("delta"))
                 .and_then(|d| d.get("tool_calls"))
@@ -627,65 +698,110 @@ fn extract_tool_calls(parsed: &Value, provider: &str) -> Option<Value> {
 
 fn is_stream_done(parsed: &Value, provider: &str) -> bool {
     match provider {
-        "anthropic" => {
-            parsed.get("type").and_then(|t| t.as_str()) == Some("message_stop")
-        }
-        _ => {
-            parsed.get("choices")
-                .and_then(|c| c.get(0))
-                .and_then(|c| c.get("finish_reason"))
-                .and_then(|r| r.as_str())
-                .is_some_and(|r| r == "stop" || r == "end_turn")
-        }
+        "anthropic" => parsed.get("type").and_then(|t| t.as_str()) == Some("message_stop"),
+        _ => parsed
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("finish_reason"))
+            .and_then(|r| r.as_str())
+            .is_some_and(|r| r == "stop" || r == "end_turn"),
     }
 }
 
 // ── Blocking call (for legacy ai_chat) ──
 
-async fn call_blocking(provider: &str, api_key: &str, model: &str, messages: &[ChatMessageInput]) -> Result<String, String> {
+async fn call_blocking(
+    provider: &str,
+    api_key: &str,
+    model: &str,
+    messages: &[ChatMessageInput],
+) -> Result<String, String> {
     match provider {
         "anthropic" => {
-            let system = messages.iter().find(|m| m.role == "system").map(|m| m.content.clone()).unwrap_or_default();
-            let msgs: Vec<Value> = messages.iter().filter(|m| m.role != "system").map(|m| serialize_message(m)).collect();
-            let body = json!({ "model": model, "max_tokens": 4096, "system": system, "messages": msgs });
+            let system = messages
+                .iter()
+                .find(|m| m.role == "system")
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+            let msgs: Vec<Value> = messages
+                .iter()
+                .filter(|m| m.role != "system")
+                .map(serialize_message)
+                .collect();
+            let body =
+                json!({ "model": model, "max_tokens": 4096, "system": system, "messages": msgs });
             let client = http_client();
-            let response = client.post("https://api.anthropic.com/v1/messages")
+            let response = client
+                .post("https://api.anthropic.com/v1/messages")
                 .header("x-api-key", api_key)
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json")
-                .json(&body).send().await.map_err(|e| format!("Request failed: {}", e))?;
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("Request failed: {}", e))?;
             if !response.status().is_success() {
-                let s = response.status(); let b = response.text().await.unwrap_or_default();
+                let s = response.status();
+                let b = response.text().await.unwrap_or_default();
                 return Err(format!("API error {}: {}", s, b));
             }
-            let parsed: Value = response.json().await.map_err(|e| format!("Parse error: {}", e))?;
-            parsed.get("content").and_then(|c| c.as_array())
-                .and_then(|arr| arr.iter().find_map(|item| {
-                    if item.get("type").and_then(|t| t.as_str()) == Some("text") {
-                        item.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
-                    } else { None }
-                })).ok_or_else(|| "Empty response".into())
+            let parsed: Value = response
+                .json()
+                .await
+                .map_err(|e| format!("Parse error: {}", e))?;
+            parsed
+                .get("content")
+                .and_then(|c| c.as_array())
+                .and_then(|arr| {
+                    arr.iter().find_map(|item| {
+                        if item.get("type").and_then(|t| t.as_str()) == Some("text") {
+                            item.get("text")
+                                .and_then(|t| t.as_str())
+                                .map(|s| s.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .ok_or_else(|| "Empty response".into())
         }
         _ => {
             let url = match provider {
                 "openai" => "https://api.openai.com/v1/chat/completions",
                 _ => "https://openrouter.ai/api/v1/chat/completions",
             };
-            let msgs: Vec<Value> = messages.iter().map(|m| serialize_message(m)).collect();
-            let token_field = if provider == "openai" { "max_completion_tokens" } else { "max_tokens" };
+            let msgs: Vec<Value> = messages.iter().map(serialize_message).collect();
+            let token_field = if provider == "openai" {
+                "max_completion_tokens"
+            } else {
+                "max_tokens"
+            };
             let body = json!({ "model": model, token_field: 4096, "messages": msgs });
             let client = http_client();
-            let response = client.post(url)
+            let response = client
+                .post(url)
                 .header("Authorization", format!("Bearer {}", api_key))
                 .header("content-type", "application/json")
-                .json(&body).send().await.map_err(|e| format!("Request failed: {}", e))?;
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("Request failed: {}", e))?;
             if !response.status().is_success() {
-                let s = response.status(); let b = response.text().await.unwrap_or_default();
+                let s = response.status();
+                let b = response.text().await.unwrap_or_default();
                 return Err(format!("API error {}: {}", s, b));
             }
-            let parsed: Value = response.json().await.map_err(|e| format!("Parse error: {}", e))?;
-            parsed.get("choices").and_then(|c| c.get(0)).and_then(|c| c.get("message"))
-                .and_then(|m| m.get("content")).and_then(|c| c.as_str()).map(|s| s.to_string())
+            let parsed: Value = response
+                .json()
+                .await
+                .map_err(|e| format!("Parse error: {}", e))?;
+            parsed
+                .get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("message"))
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_str())
+                .map(|s| s.to_string())
                 .ok_or_else(|| "Empty response".into())
         }
     }
@@ -709,7 +825,6 @@ fn display_provider(p: &str) -> &str {
         _ => p,
     }
 }
-
 
 #[cfg(test)]
 mod tests {
