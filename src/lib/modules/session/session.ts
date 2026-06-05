@@ -2,7 +2,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { get } from 'svelte/store';
 import { openFiles, activeFilePath, maxRecentProjects, expandedDirsStore } from '../explorer/files';
 import { projectRoot } from '../git/git';
-import { terminalTabs, showTerminal } from '../terminal/shell';
+import { terminalTabs, showTerminal, activeTerminalCwd } from '../terminal/shell';
+import { previewUrl } from '../settings/settings';
 import { log } from '../logging';
 
 export interface SessionFile {
@@ -16,6 +17,8 @@ export interface SessionData {
   terminal_count: number;
   terminal_visible: boolean;
   expanded_dirs: string[];
+  preview_url: string | null;
+  terminal_cwd: string | null;
 }
 
 export interface RecentProject {
@@ -50,6 +53,8 @@ export function buildSessionData(): SessionData {
     terminal_count: tabs.length,
     terminal_visible: termVisible,
     expanded_dirs: [...expanded],
+    preview_url: get(previewUrl) || null,
+    terminal_cwd: get(activeTerminalCwd) || null,
   };
 }
 

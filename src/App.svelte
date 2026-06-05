@@ -1,6 +1,6 @@
 <script lang="ts">
   import FileTree from './lib/components/filetree/FileTree.svelte';
-  import { Sparkles, TerminalSquare, FolderOpen, Plus, GitBranch } from 'lucide-svelte';
+  import { Sparkles, TerminalSquare, Search } from 'lucide-svelte';
   import Editor from './lib/components/editor/Editor.svelte';
   import FileViewer from './lib/components/file-viewer/FileViewer.svelte';
   import JSONViewer from './lib/components/file-viewer/JSONViewer.svelte';
@@ -12,22 +12,28 @@
   import TerminalPanel from './lib/components/shell/TerminalPanel.svelte';
   import FloatingChat from './lib/components/ai/FloatingChat.svelte';
   import GitPanel from './lib/components/git/GitPanel.svelte';
+  import SidebarRail from './lib/components/sidebar/SidebarRail.svelte';
+  import ThemeEditor from './lib/components/theme/ThemeEditor.svelte';
   import FileSearch from './lib/components/filetree/FileSearch.svelte';
+  import FindInFiles from './lib/components/filetree/FindInFiles.svelte';
+  import CommandPalette from './lib/components/palette/CommandPalette.svelte';
+  import SurfaceLayer from './lib/components/theme/SurfaceLayer.svelte';
+  import StatusBar from './lib/components/statusbar/StatusBar.svelte';
+  import CwdBreadcrumb from './lib/components/statusbar/CwdBreadcrumb.svelte';
   import Preview from './lib/components/preview/Preview.svelte';
   import FileDiagram from './lib/components/diagram/FileDiagram.svelte';
+  import GitGraphView from './lib/components/git/GitGraphView.svelte';
   import Toast from './lib/components/Toast.svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { exists } from '@tauri-apps/plugin-fs';
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
-  import { openFiles, activeFile, activeFilePath, activeFileModified, addFile, autosaveEnabled, projectRoot, gitBranch, showSettings, showTerminal, showPreview, isTerminalPath, isPreviewPath, isDiagramPath, isDiffPath, getDiffFilePath, getDiagramFilePath, PREVIEW_PATH, terminalTabs, activeTerminalTabId, createTerminalSignal, appearanceMode, uiFontSize, uiDensity, apiKey, openaiApiKey, anthropicApiKey, sharedGitStatus, nextTab, prevTab, showChat, showGit, toggleChatPanel, toggleGitPanel, fileTreeNavTarget, terminalPath, openFileSearchSignal, openDiagramSearchSignal, openDiagrams, diagramPath, terminalMode, saveConversationNow, createFileSignal, createFolderSignal, breadcrumbSegmentsFor, createPanelResizer, type PanelTarget } from './lib/modules';
-  import { getRecentProjects, removeRecentProject, scheduleSaveSession, saveSessionNow, type RecentProject } from './lib/modules/session';
+  import { openFiles, activeFile, activeFilePath, activeFileModified, addFile, autosaveEnabled, projectRoot, gitBranch, showSettings, showTerminal, showPreview, isTerminalPath, isPreviewPath, isDiagramPath, isDiffPath, getDiffFilePath, getDiagramFilePath, PREVIEW_PATH, isGitGraphPath, GIT_GRAPH_PATH, showGitGraph, terminalTabs, activeTerminalTabId, createTerminalSignal, splitTerminalSignal, terminalCdSignal, terminalSearchSignal, appearanceMode, uiZoom, uiDensity, apiKey, openaiApiKey, anthropicApiKey, sharedGitStatus, nextTab, prevTab, showChat, sidebarView, sidebarVisible, selectSidebarView, toggleSidebar, toggleChatPanel, toggleGitPanel, showFindInFiles, toggleFindInFiles, showCommandPalette, type PaletteAction, activeCustomThemeId, customThemes, applyActiveTheme, editorTheme, isThemeTabPath, getThemeTabId, themeTabPath, openThemeTab, openThemeTabs, onThemeEdit, reloadCustomThemes, fileTreeNavTarget, terminalPath, openFileSearchSignal, openDiagramSearchSignal, openDiagrams, diagramPath, terminalMode, saveConversationNow, createFileSignal, createFolderSignal, breadcrumbSegmentsFor, cwdBreadcrumbSegments, activeTerminalCwd, createPanelResizer, type PanelTarget } from './lib/modules';
+  import { scheduleSaveSession, saveSessionNow } from './lib/modules/session';
   import { log } from './lib/modules/logging';
   import { isMac, isFullscreen, installWindowChromeWatchers, openSettingsWindow } from './lib/modules/ui';
-  import { openFolderInNewWindow } from './lib/modules/window/window';
   import { showToast } from './lib/modules/ui/toast';
   import { toggleTerminal } from './lib/modules/terminal';
-  import { shortcutBindings, eventMatchesBinding, APP_LEVEL_SHORTCUT_IDS, type AppLevelShortcutId } from './lib/modules/shortcuts';
+  import { shortcutBindings, APP_LEVEL_SHORTCUT_IDS, type AppLevelShortcutId, createChordMatcher, normalizeKeyEvent } from './lib/modules/shortcuts';
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
 
@@ -45,24 +51,10 @@
     return path.toLowerCase().endsWith('.json');
   }
 
-  let recentProjects = $state<RecentProject[]>([]);
-  let showAllRecent = $state(false);
   let openFolderByPath: ((path: string, restoreSession?: boolean) => Promise<void>) | null = null;
 
   function handleOpenFolder(fn: (path: string, restoreSession?: boolean) => Promise<void>) {
     openFolderByPath = fn;
-  }
-
-  async function openRecentProject(project: RecentProject) {
-    if (!openFolderByPath) return;
-    const folderExists = await exists(project.path);
-    if (!folderExists) {
-      await removeRecentProject(project.path);
-      recentProjects = recentProjects.filter(p => p.path !== project.path);
-      showToast({ level: 'warn', message: `Project folder no longer exists: ${project.path}` });
-      return;
-    }
-    await openFolderByPath(project.path);
   }
 
   async function openProjectFromToolbar(path: string) {
@@ -114,15 +106,16 @@
 
   let showFileSearch = $state(false);
   let showDiagramSearch = $state(false);
-  let sidebarWidth = $state(220);
-  let sidebarVisible = $state(true);
+  let sidebarWidth = $state(300);
 
-  function toggleSidebar() {
-    sidebarVisible = !sidebarVisible;
-  }
+  // Git view is mounted lazily on first switch, then kept mounted (display
+  // toggled) so its polling/state survive; FileTree stays mounted always so
+  // its watcher + cwd-follow effect keep running behind the git view.
+  let gitMounted = $state(false);
+  $effect(() => { if ($sidebarView === 'git') gitMounted = true; });
+  let changedCount = $derived(Object.keys($sharedGitStatus).length);
 
   let chatWidth = $state(320);
-  let gitWidth = $state(360);
 
   // --- Drag resize logic ---
   // The state machine (rAF coalescing, body-cursor toggle, listener
@@ -130,12 +123,10 @@
   // independently. The component just owns the three width cells.
   let dragging = $state<PanelTarget | null>(null);
   const panelResizer = createPanelResizer({
-    sidebar: { min: 140, max: 500 },
+    sidebar: { min: 295, max: 500 },
     chat:    { min: 200, max: 600 },
-    git:     { min: 260, max: 600 },
     setSidebarWidth: (w) => { sidebarWidth = w; },
     setChatWidth:    (w) => { chatWidth = w; },
-    setGitWidth:     (w) => { gitWidth = w; },
     onDragStateChange: (t) => { dragging = t; },
   });
   const startDrag = (t: PanelTarget) => panelResizer.startDrag(t);
@@ -166,9 +157,20 @@
     breadcrumbSegmentsFor($activeFilePath, $projectRoot)
   );
 
+  // Bottom-left breadcrumb for terminals: the active terminal's cwd as
+  let homeDir = $state<string | null>(null);
+  let terminalCwdSegments = $derived(cwdBreadcrumbSegments($activeTerminalCwd, homeDir));
+
   function navigateBreadcrumb(path: string) {
-    if (!sidebarVisible) toggleSidebar();
+    if (!$sidebarVisible) toggleSidebar();
     fileTreeNavTarget.set(path);
+  }
+
+  /** 
+   *  The file tree follows automatically via the OSC-7 cwd report. */
+  function cdTerminal(path: string) {
+    showTerminal.set(true);
+    terminalCdSignal.update(s => ({ count: s.count + 1, path }));
   }
 
   onMount(async () => {
@@ -177,6 +179,9 @@
     // the very first frame. The teardown isn't captured because this
     // component lives for the entire app lifetime.
     void installWindowChromeWatchers().catch(() => {});
+
+    // Home dir for the terminal cwd breadcrumb (`~` collapsing).
+    void invoke<string>('get_home_dir').then(h => { homeDir = h; }).catch(() => {});
 
     // Load API keys from OS keychain into stores
     const providers = ['openrouter', 'openai', 'anthropic'] as const;
@@ -208,10 +213,6 @@
         getCurrentWindow().setTitle(name).catch(() => {});
       }
     });
-    // Load recent projects
-    try {
-      recentProjects = await getRecentProjects();
-    } catch { /* ignore */ }
 
     // Handle restored sessions: if the user's saved `activeFilePath` is
     // a terminal sentinel but their current layout is panel mode, move
@@ -229,7 +230,7 @@
     await listen('menu:save-all', () => { document.dispatchEvent(new CustomEvent('menu-save-all')); });
     await listen('menu:close-tab', () => { document.dispatchEvent(new CustomEvent('menu-close-tab')); });
     await listen('menu:close-window', async () => { (await import('@tauri-apps/api/window')).getCurrentWindow().close(); });
-    await listen('menu:toggle-file-tree', () => { sidebarVisible = !sidebarVisible; });
+    await listen('menu:toggle-file-tree', () => { toggleSidebar(); });
     await listen('menu:toggle-ai-panel', () => { toggleChatPanel(); });
     await listen('menu:toggle-terminal', () => { toggleTerminal(); });
     await listen('menu:toggle-sidebar', () => { toggleSidebar(); });
@@ -266,8 +267,22 @@
       const initialProject: string | null = await invoke('get_initial_project');
       if (initialProject && openFolderByPath) {
         await openFolderByPath(initialProject);
+      } else if (openFolderByPath && get(projectRoot) === null) {
+        try {
+          const home = await invoke<string>('get_home_dir');
+          await openFolderByPath(home, false);
+          toggleTerminal();
+        } catch { /* home unavailable — fall back to the welcome screen */ }
       }
     } catch { /* no initial project — normal for main window */ }
+
+    // The settings window asks us (the main window) to open a custom theme as
+    // a JSON editor tab. Re-read the store first so a just-created theme exists.
+    void onThemeEdit((req) => {
+      reloadCustomThemes();
+      openThemeTab(req.id);
+      activeFilePath.set(themeTabPath(req.id));
+    });
 
     // Save session on window close — await the save before destroying
     const appWindow = getCurrentWindow();
@@ -309,14 +324,42 @@
     }
   });
 
-  // Apply UI font size
+  // Apply UI zoom via a CSS var consumed only by `.ide-top` (the working
+  // tab bar and status bar stay at 100% so nothing gets clipped past 100%.
   $effect(() => {
-    document.documentElement.style.fontSize = $uiFontSize + 'px';
+    document.documentElement.style.setProperty('--app-zoom', String($uiZoom || 1));
+  });
+
+  // Apply the active custom theme (CSS-var overrides) reactively.
+  $effect(() => {
+    $activeCustomThemeId;
+    $customThemes;
+    applyActiveTheme($editorTheme);
+  });
+
+  // Prune theme tabs whose theme was deleted (e.g. from the settings window).
+  $effect(() => {
+    const ids = new Set($customThemes.map(t => t.id));
+    const open = get(openThemeTabs);
+    const alive = open.filter(id => ids.has(id));
+    if (alive.length !== open.length) {
+      openThemeTabs.set(alive);
+      const active = get(activeFilePath);
+      if (isThemeTabPath(active) && !ids.has(getThemeTabId(active ?? ''))) {
+        activeFilePath.set(get(openFiles).at(-1)?.path ?? null);
+      }
+    }
   });
 
   // Apply UI density
   $effect(() => {
     document.documentElement.dataset.density = $uiDensity;
+  });
+
+  // Expose the active theme as a data attribute so theme-scoped CSS (e.g. the
+  // plum glass effect) can target it. Custom themes opt out of theme styling.
+  $effect(() => {
+    document.documentElement.dataset.theme = $activeCustomThemeId ? 'custom' : $editorTheme;
   });
 
   // ── Terminal mode transitions ──────────────────────────────────
@@ -355,14 +398,6 @@
     scheduleSaveSession();
   });
 
-  // Refresh recent projects when returning to the welcome screen
-  $effect(() => {
-    if ($activeFile === null) {
-      showAllRecent = false;
-      getRecentProjects().then(p => recentProjects = p).catch(() => {});
-    }
-  });
-
   $effect(() => {
     if ($openFileSearchSignal > 0) {
       showFileSearch = true;
@@ -380,9 +415,28 @@
     if (isPreviewPath($activeFilePath)) showPreview.set(true);
   });
 
+  $effect(() => {
+    if (isGitGraphPath($activeFilePath)) showGitGraph.set(true);
+  });
+
   function handleKeydown(e: KeyboardEvent) {
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 'k' || e.key === 'K')) {
+      // The editor owns Cmd+K for inline AI edit when there's a selection; in
+      // that case it calls preventDefault, so we defer. With no selection the
+      // editor lets it fall through and Cmd+K opens the command palette.
+      if (e.defaultPrevented) return;
+      e.preventDefault();
+      showCommandPalette.update(v => !v);
+      return;
+    }
     dispatchAppShortcut(e);
   }
+
+  const paletteExtras: PaletteAction[] = [
+    { id: 'view.terminal', label: 'Toggle Terminal', group: 'View', keywords: ['shell', 'console'], run: () => toggleTerminal() },
+    { id: 'view.sidebar', label: 'Toggle Sidebar', group: 'View', keywords: ['explorer', 'files'], run: () => toggleSidebar() },
+    { id: 'terminal.search', label: 'Search Terminal', group: 'Search', keywords: ['find', 'terminal'], run: () => { $showTerminal = true; terminalSearchSignal.update(n => n + 1); } },
+  ];
 
   /**
    * Match `e` against the app-level shortcut bindings and run the
@@ -397,9 +451,10 @@
    * shortcuts.ts and add the action below. TypeScript enforces that
    * the action map covers every id (`Record<AppLevelShortcutId, …>`).
    */
-  function dispatchAppShortcut(e: KeyboardEvent): boolean {
-    const bindings = $shortcutBindings;
+  let appChordMatcher: ReturnType<typeof createChordMatcher> | null = null;
+  let chordResetTimer: ReturnType<typeof setTimeout> | null = null;
 
+  function dispatchAppShortcut(e: KeyboardEvent): boolean {
     const actions: Record<AppLevelShortcutId, () => void> = {
       'view.toggleTerminal': () => toggleTerminal(),
       'view.toggleChat':     () => toggleChatPanel(),
@@ -411,55 +466,38 @@
       'tabs.prevAlt':        () => prevTab(),
       'tabs.next':           () => nextTab(),
       'tabs.prev':           () => prevTab(),
+      'terminal.splitRight': () => { showTerminal.set(true); splitTerminalSignal.update(s => ({ count: s.count + 1, direction: 'right' })); },
+      'terminal.splitDown':  () => { showTerminal.set(true); splitTerminalSignal.update(s => ({ count: s.count + 1, direction: 'bottom' })); },
+      'terminal.new':        () => { showTerminal.set(true); createTerminalSignal.update(s => ({ count: s.count + 1, forceNew: true })); },
     };
 
-    for (const id of APP_LEVEL_SHORTCUT_IDS) {
-      const binding = bindings[id];
-      if (binding && eventMatchesBinding(e, binding)) {
-        e.preventDefault();
-        actions[id]();
-        return true;
-      }
+    // If a focused control already handled this key (e.g. the editor's
+    // Cmd+D = select-next-occurrence calls preventDefault), let it win.
+    // The terminal capture path runs before any control, so defaultPrevented
+    // is false there and terminal shortcuts (Cmd+D split, …) still fire.
+    if (e.defaultPrevented) return false;
+
+    if (!appChordMatcher) {
+      appChordMatcher = createChordMatcher(() => {
+        const b = $shortcutBindings;
+        return Object.fromEntries(APP_LEVEL_SHORTCUT_IDS.map(id => [id, b[id] ?? '']));
+      });
+    }
+    const chord = normalizeKeyEvent(e);
+    if (!chord) return false;
+    const r = appChordMatcher.feed(chord);
+    if (chordResetTimer) { clearTimeout(chordResetTimer); chordResetTimer = null; }
+    if (r.status === 'match') { e.preventDefault(); actions[r.id as AppLevelShortcutId](); return true; }
+    if (r.status === 'pending') {
+      e.preventDefault();
+      chordResetTimer = setTimeout(() => appChordMatcher?.reset(), 1000);
+      return true;
     }
     return false;
   }
 
-  /**
-   * Capture-phase keydown listener installed on `window`.
-   *
-   * xterm.js installs its own keydown listener on a hidden helper
-   * textarea inside the terminal and, by default, processes most
-   * keystrokes locally (writing them to the PTY and calling
-   * preventDefault + stopPropagation on the way out). That means the
-   * bubble-phase `<svelte:window onkeydown>` listener below never sees
-   * the event when the terminal has focus — so without this capture
-   * listener, opening a terminal silently disables every app-level
-   * shortcut (Ctrl+Tab, Ctrl+`, Cmd+B, Cmd+L, Cmd+G, Cmd+Shift+], …).
-   *
-   * Why capture phase: events flow window → … → xterm-helper-textarea
-   * during the capture phase. Listening at the window with
-   * `{ capture: true }` puts us first in line, before xterm.js can
-   * call preventDefault/stopPropagation. This is the same pattern used
-   * by terax-ai's `useGlobalShortcuts`.
-   *
-   * Why scoped to terminal targets: many app shortcuts share key
-   * combinations with editor / chat keymaps (Cmd+G = "find next" in
-   * CodeMirror, Cmd+L = "select line", Cmd+Shift+] / [ = indent more
-   * / less). When the editor is focused, the editor's keymap MUST win
-   * — so we only intercept events whose target is inside the terminal
-   * area. Anything else falls through to the editor's local handler
-   * and (if it doesn't preventDefault) to the bubble-phase listener.
-   *
-   * Why stopImmediatePropagation: prevents the event from also being
-   * delivered to the bubble-phase window handler later, which would
-   * fire the action a second time.
-   */
+
   function handleKeydownCapture(e: KeyboardEvent) {
-    // Don't intercept events that are part of an active IME composition
-    // sequence (e.g. CJK input). Today none of the app-level shortcuts
-    // could overlap with composition because they all require a
-    // non-letter modifier combo, but bare-letter shortcuts could be
-    // added in the future and this guard makes that safe.
     if (e.isComposing) return;
     const target = e.target;
     if (!(target instanceof Element)) return;
@@ -480,20 +518,32 @@
 <svelte:window onkeydown={handleKeydown} />
 
 <div class="ide-layout" class:mac-traffic-lights={isMac && !$isFullscreen}>
-  <TitleBar {sidebarVisible} onToggleSidebar={toggleSidebar} />
+  <TitleBar sidebarVisible={$sidebarVisible} onToggleSidebar={toggleSidebar} />
   <Toolbar
     onOpenProject={openProjectFromToolbar}
     onOpenFolderDialog={openFolderDialog}
+    onNewProject={newProjectDialog}
+    onCloneRepo={cloneRepoDialog}
     onSearchFiles={() => { showFileSearch = !showFileSearch; }}
     onNewFile={() => createFileSignal.update(n => n + 1)}
     onNewFolder={() => createFolderSignal.update(n => n + 1)}
   />
   <div class="ide-top">
-    <div class="sidebar" class:hidden={!sidebarVisible} style="width: {sidebarWidth}px">
-      <FileTree onFileSelect={(path, name) => addFile(path, name)} onSearchFiles={() => showFileSearch = true} onOpenFolder={handleOpenFolder} />
+    <div class="sidebar" class:hidden={!$sidebarVisible} style="width: {sidebarWidth}px">
+      <div class="sidebar-body">
+        <div class="sidebar-pane" style:display={$sidebarView === 'git' ? 'none' : ''}>
+          <FileTree onFileSelect={(path, name) => addFile(path, name)} onSearchFiles={() => showFileSearch = true} onOpenFolder={handleOpenFolder} />
+        </div>
+        {#if gitMounted}
+          <div class="sidebar-pane" style:display={$sidebarView === 'git' ? '' : 'none'}>
+            <GitPanel />
+          </div>
+        {/if}
+      </div>
+      <SidebarRail activeView={$sidebarView} onSelect={selectSidebarView} {changedCount} />
     </div>
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="resize-handle resize-handle-col" class:hidden={!sidebarVisible} onmousedown={startDrag('sidebar')}></div>
+    <div class="resize-handle resize-handle-col" class:hidden={!$sidebarVisible} onmousedown={startDrag('sidebar')}></div>
 
     <div class="main-area">
       <div class="editor-col">
@@ -523,8 +573,22 @@
                 <FileDiagram filePath={getDiagramFilePath($activeFilePath ?? '')} />
               </div>
             {/if}
+            <!-- Git graph tab -->
+            {#if isGitGraphPath($activeFilePath)}
+              <div class="terminal-tab-slot focused">
+                <GitGraphView />
+              </div>
+            {/if}
+            <!-- Theme editor tab (custom theme JSON) -->
+            {#if isThemeTabPath($activeFilePath)}
+              <div class="terminal-tab-slot focused">
+                {#key getThemeTabId($activeFilePath ?? '')}
+                  <ThemeEditor themeId={getThemeTabId($activeFilePath ?? '')} />
+                {/key}
+              </div>
+            {/if}
             <!-- File editor — hidden while a terminal or preview tab is focused -->
-            {#if !($showTerminal && isTerminalPath($activeFilePath)) && !isPreviewPath($activeFilePath) && !isDiagramPath($activeFilePath)}
+            {#if !($showTerminal && isTerminalPath($activeFilePath)) && !isPreviewPath($activeFilePath) && !isDiagramPath($activeFilePath) && !isGitGraphPath($activeFilePath) && !isThemeTabPath($activeFilePath)}
               {#if $activeFile && isDiffPath($activeFilePath)}
                 <DiffViewer filePath={getDiffFilePath($activeFilePath ?? '')} />
               {:else if $activeFile && $sharedGitStatus[$activeFile] === 'C'}
@@ -535,48 +599,6 @@
                 <FileViewer filePath={$activeFile} />
               {:else if $activeFile}
                 <Editor filePath={$activeFile} />
-              {:else}
-                <div class="welcome">
-                  <img src="/leo.png" alt="leo" class="welcome-logo" />
-                  <h3> [  W E L C O M E ] </h3>
-                  {#if recentProjects.length > 0}
-                    <div class="recent-projects">
-                      <div class="recent-header-row">
-                        <span class="recent-header">RECENT</span>
-                        <span class="recent-header-line"></span>
-                        <span class="recent-header-dot"></span>
-                      </div>
-                      {#each (showAllRecent ? recentProjects : recentProjects.slice(0, 3)) as project}
-                        <button class="recent-item" onclick={(e: MouseEvent) => { if (e.metaKey || e.ctrlKey) { openFolderInNewWindow(project.path); } else { openRecentProject(project); } }}>
-                          <FolderOpen size={16} class="recent-folder-icon" />
-                          <div class="recent-item-text">
-                            <span class="recent-name">{project.name}</span>
-                            <span class="recent-path">{project.path}</span>
-                          </div>
-                        </button>
-                      {/each}
-                      {#if recentProjects.length > 3}
-                        <button class="show-more-btn" onclick={() => showAllRecent = !showAllRecent}>
-                          {showAllRecent ? 'Show less' : `Show more (${recentProjects.length - 3})`}
-                        </button>
-                      {/if}
-                    </div>
-                  {/if}
-                  <div class="welcome-actions">
-                    <button class="welcome-action-btn" onclick={openFolderDialog}>
-                      <FolderOpen size={16} />
-                      Open Folder
-                    </button>
-                    <button class="welcome-action-btn" onclick={newProjectDialog}>
-                      <Plus size={16} />
-                      New Project
-                    </button>
-                    <button class="welcome-action-btn" onclick={cloneRepoDialog}>
-                      <GitBranch size={16} />
-                      Clone Repo
-                    </button>
-                  </div>
-                </div>
               {/if}
             {/if}
           </div>
@@ -589,21 +611,23 @@
       <!-- Floating chat rendered below -->
     {/if}
 
-    {#if $showGit}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="resize-handle resize-handle-col" onmousedown={startDrag('git')}></div>
-      <div class="git-panel-container" style="width: {gitWidth}px">
+    {#if $showFindInFiles}
+      <div class="git-panel-container" style="width: 320px">
         <div class="panel-header">
-          <span>Source Control</span>
-          <button onclick={toggleGitPanel}>✕</button>
+          <span>Search</span>
+          <button onclick={toggleFindInFiles}>✕</button>
         </div>
-        <GitPanel />
+        <FindInFiles />
       </div>
     {/if}
 
 
     {#if showFileSearch}
       <FileSearch onClose={() => showFileSearch = false} />
+    {/if}
+
+    {#if $showCommandPalette}
+      <CommandPalette extraActions={paletteExtras} onClose={() => showCommandPalette.set(false)} />
     {/if}
 
     {#if clonePaletteOpen}
@@ -633,8 +657,16 @@
 
   <div class="statusbar">
     <div class="statusbar-left">
-      {#if isTerminalPath($activeFilePath) || isPreviewPath($activeFilePath)}
-        <span class="breadcrumb-plain">{isTerminalPath($activeFilePath) ? 'Terminal' : 'Preview'}</span>
+      {#if isTerminalPath($activeFilePath)}
+        {#if terminalCwdSegments.length > 0}
+          <CwdBreadcrumb segments={terminalCwdSegments} onCd={cdTerminal} />
+        {:else}
+          <span class="breadcrumb-plain">Terminal</span>
+        {/if}
+      {:else if isPreviewPath($activeFilePath)}
+        <span class="breadcrumb-plain">Preview</span>
+      {:else if isGitGraphPath($activeFilePath)}
+        <span class="breadcrumb-plain">Git Graph</span>
       {:else if isDiagramPath($activeFilePath)}
         <span class="breadcrumb-plain">Diagram: {getDiagramFilePath($activeFilePath ?? '').split('/').pop()}</span>
       {:else if breadcrumbSegments.length > 0}
@@ -654,6 +686,7 @@
       {/if}
     </div>
     <div class="statusbar-right">
+      <StatusBar />
       {#if $terminalMode === 'panel'}
         <button
           class="statusbar-terminal-btn"
@@ -681,6 +714,9 @@
           {/if}
         </span>
       {/if}
+      <button class="statusbar-ai-btn" class:active={$showFindInFiles} onclick={toggleFindInFiles} title="Search in Files">
+        <Search size={13} />
+      </button>
       <button class="statusbar-ai-btn" class:active={$showChat} onclick={() => showChat.update(v => !v)} title="Leo AI (Ctrl+L)">
         <Sparkles size={13} />
       </button>
@@ -690,6 +726,7 @@
 
 <FloatingChat />
 <Toast />
+<SurfaceLayer />
 
 <style>
   .ide-layout {
@@ -774,6 +811,7 @@
     min-height: 0;
     min-width: 0;
     overflow: hidden;
+    zoom: var(--app-zoom, 1);
   }
 
   .sidebar {
@@ -785,6 +823,9 @@
     flex-shrink: 0;
     min-width: 100px;
   }
+
+  .sidebar-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .sidebar-pane { flex: 1; min-height: 0; overflow: hidden; }
 
   .main-area {
     flex: 1;
@@ -827,147 +868,6 @@
   .terminal-tab-slot.focused {
     visibility: visible;
     pointer-events: auto;
-  }
-
-  .welcome {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    height: 100%;
-    color: var(--text-muted);
-    gap: 20px;
-    font-family: var(--font-display);
-  }
-
-  .welcome-logo {
-    width: 56px;
-    height: 56px;
-    border-radius: 11px;
-  }
-
-  .recent-projects {
-    display: flex;
-    flex-direction: column;
-    width: 460px;
-    gap: 5px;
-    max-height: 380px;
-    overflow-y: auto;
-  }
-
-  .recent-header-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 6px;
-  }
-
-  .recent-header {
-    font-size: 12px;
-    font-weight: 600;
-    letter-spacing: 1.2px;
-    color: var(--text-muted);
-    flex-shrink: 0;
-  }
-
-  .recent-header-line {
-    flex: 1;
-    height: 1px;
-    background: var(--border);
-  }
-
-  .recent-header-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--settings-icon, #B34B3C);
-    flex-shrink: 0;
-  }
-
-  .recent-item {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 7px 14px;
-    background: var(--bg-surface);
-    border: 1px solid var(--border);
-    border-radius: 7px;
-    cursor: pointer;
-    text-align: left;
-    transition: border-color 0.15s;
-  }
-
-  .recent-item:hover {
-    border-color: var(--text-muted);
-  }
-
-  :global(.recent-folder-icon) {
-    flex-shrink: 0;
-    color: var(--text-secondary);
-  }
-
-  .recent-item-text {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    min-width: 0;
-  }
-
-  .recent-name {
-    color: var(--text-primary);
-    font-size: 14px;
-    font-weight: 600;
-  }
-
-  .recent-path {
-    color: var(--text-muted);
-    font-size: 11px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 100%;
-  }
-
-  .show-more-btn {
-    font-size: 12px;
-    color: var(--text-muted);
-    padding: 6px 12px;
-    border-radius: 6px;
-    cursor: pointer;
-    transition: color 0.15s;
-    align-self: flex-start;
-    margin-top: 2px;
-  }
-
-  .show-more-btn:hover {
-    color: var(--text-primary);
-  }
-
-  .welcome-actions {
-    display: flex;
-    gap: 8px;
-    width: 460px;
-  }
-
-  .welcome-action-btn {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 7px;
-    padding: 10px 12px;
-    background: var(--bg-surface);
-    border: 1px solid var(--border);
-    border-radius: 7px;
-    color: var(--text-primary);
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: border-color 0.15s;
-  }
-
-  .welcome-action-btn:hover {
-    border-color: var(--text-muted);
   }
 
   /* Resize handles */
@@ -1027,15 +927,15 @@
   }
 
   .statusbar {
-    background: var(--accent);
+    background: var(--statusbar-bg, var(--accent));
     color: var(--statusbar-text, #E8E2D5);
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 0 12px;
-    height: 28px;
-    font-size: 12px;
-    font-weight: 500;
+    padding: 0 14px;
+    height: var(--density-statusbar-height, 28px);
+    font-size: 13px;
+    font-weight: 600;
     min-width: 0;
     overflow: hidden;
     flex-shrink: 0;
@@ -1063,7 +963,7 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    font-size: 11px;
+    font-size: 12.5px;
     font-weight: 500;
     padding: 1px 6px;
     border-radius: 3px;
@@ -1082,8 +982,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 20px;
-    height: 20px;
+    width: 24px;
+    height: 24px;
     border-radius: 4px;
     color: var(--statusbar-text, #E8E2D5);
     cursor: pointer;
@@ -1111,10 +1011,10 @@
     align-items: center;
     gap: 4px;
     padding: 0 8px;
-    height: 22px;
+    height: 24px;
     border-radius: 4px;
     color: inherit;
-    font-size: 11.5px;
+    font-size: 13px;
     font-weight: 500;
     cursor: pointer;
     background: transparent;
@@ -1136,7 +1036,7 @@
     display: flex;
     align-items: center;
     gap: 3px;
-    font-size: 11.5px;
+    font-size: 13px;
     min-width: 0;
     overflow: hidden;
     padding-left: 8px;
@@ -1148,8 +1048,8 @@
     gap: 4px;
     padding: 1px 0;
     white-space: nowrap;
-    font-size: 11.5px;
-    font-weight: 400;
+    font-size: 13px;
+    font-weight: 500;
     color: inherit;
     cursor: pointer;
     transition: opacity 0.1s;
@@ -1163,21 +1063,23 @@
     width: 4px;
     height: 4px;
     border-radius: 50%;
-    background: var(--settings-icon, #B34B3C);
+    background: currentColor;
+    opacity: 0.7;
     flex-shrink: 0;
   }
 
   .breadcrumb-sep {
     opacity: 0.75;
-    font-size: 11px;
+    font-size: 12.5px;
     font-weight: 600;
     flex-shrink: 0;
     color: inherit;
   }
 
   .breadcrumb-plain {
-    font-size: 11.5px;
-    color: var(--text-muted);
+    font-size: 13px;
+    color: inherit;
+    opacity: 0.85;
     padding: 0 8px;
   }
 </style>

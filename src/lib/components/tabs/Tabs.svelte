@@ -1,7 +1,7 @@
 <script lang="ts">
   import Icon from '@iconify/svelte';
-  import { TerminalSquare, Plus, FolderOpen, Eye, RefreshCw, GitBranch } from 'lucide-svelte';
-  import { openFiles, activeFilePath, closeFile, togglePin, pinnedFiles, unpinnedFiles, sharedGitStatus, terminalTabs, activeTerminalTabId, killTerminalSignal, isTerminalPath, isPreviewPath, isDiagramPath, getDiagramFilePath, PREVIEW_PATH, showPreview, showTerminal, terminalPath, terminalTabIdFromPath, createTerminalSignal, openFileSearchSignal, openDiagramSearchSignal, openDiagrams, diagramPath, terminalMode, triggerFileTreeRefresh } from '../../modules';
+  import { TerminalSquare, Plus, FolderOpen, Eye, RefreshCw, GitBranch, Palette } from 'lucide-svelte';
+  import { openFiles, activeFilePath, closeFile, togglePin, pinnedFiles, unpinnedFiles, sharedGitStatus, terminalTabs, activeTerminalTabId, killTerminalSignal, isTerminalPath, isPreviewPath, isDiagramPath, getDiagramFilePath, PREVIEW_PATH, showPreview, showTerminal, GIT_GRAPH_PATH, showGitGraph, isGitGraphPath, terminalPath, terminalTabIdFromPath, createTerminalSignal, openFileSearchSignal, openDiagramSearchSignal, openDiagrams, diagramPath, terminalMode, triggerFileTreeRefresh, openThemeTabs, closeThemeTab, isThemeTabPath, getThemeTabId, themeTabPath, customThemes } from '../../modules';
   let refreshSpinning = $state(false);
 
   function handleRefresh() {
@@ -10,6 +10,7 @@
     setTimeout(() => { refreshSpinning = false; }, 600);
   }
   import { getFileIconName } from '../../modules/explorer';
+  import { portal } from '../../modules/ui';
 
   let tabsBar: HTMLDivElement | undefined = $state();
   let addMenuOpen = $state(false);
@@ -86,6 +87,7 @@
 
   function openExistingFileTab() { openFileSearchSignal.update(n => n + 1); addMenuOpen = false; }
   function openPreviewTab() { activeFilePath.set(PREVIEW_PATH); addMenuOpen = false; }
+  function openGitGraphTab() { activeFilePath.set(GIT_GRAPH_PATH); addMenuOpen = false; }
   function openDiagramTab() { openDiagramSearchSignal.update(n => n + 1); addMenuOpen = false; }
   function openTerminalTab() {
     // Always open a NEW terminal tab (the + menu's explicit intent).
@@ -176,6 +178,39 @@
     </div>
   {/if}
 
+  {#if $showGitGraph}
+    <div
+      class="tab"
+      class:active={isGitGraphPath($activeFilePath)}
+      role="tab"
+      tabindex="0"
+      title="Git Graph"
+      onclick={() => activeFilePath.set(GIT_GRAPH_PATH)}
+      onkeydown={(e) => e.key === 'Enter' && activeFilePath.set(GIT_GRAPH_PATH)}
+    >
+      <GitBranch size={13} />
+      <span class="tab-name">Git Graph</span>
+      <button class="tab-close" onclick={(e) => { e.stopPropagation(); showGitGraph.set(false); if (isGitGraphPath($activeFilePath)) activeFilePath.set($openFiles.at(-1)?.path ?? null); }}>×</button>
+    </div>
+  {/if}
+
+  {#each $openThemeTabs as id (id)}
+    {@const name = $customThemes.find(t => t.id === id)?.name ?? id}
+    <div
+      class="tab"
+      class:active={isThemeTabPath($activeFilePath) && getThemeTabId($activeFilePath ?? '') === id}
+      role="tab"
+      tabindex="0"
+      title="Theme: {name}"
+      onclick={() => activeFilePath.set(themeTabPath(id))}
+      onkeydown={(e) => e.key === 'Enter' && activeFilePath.set(themeTabPath(id))}
+    >
+      <Palette size={13} />
+      <span class="tab-name">{name}</span>
+      <button class="tab-close" onclick={(e) => { e.stopPropagation(); closeThemeTab(id); if (isThemeTabPath($activeFilePath) && getThemeTabId($activeFilePath ?? '') === id) activeFilePath.set($openFiles.at(-1)?.path ?? null); }}>×</button>
+    </div>
+  {/each}
+
   <div class="tab-actions">
     <button type="button" class="tab-action-btn" onclick={handleRefresh} title="Reload file tree" aria-label="Reload file tree">
       <RefreshCw size={12} class={refreshSpinning ? 'spin-once' : ''} />
@@ -187,7 +222,7 @@
 </div>
 
 {#if addMenuOpen && addMenuPos}
-  <div class="tab-add-menu" role="menu" style="top: {addMenuPos.top}px; right: {addMenuPos.right}px;">
+  <div class="tab-add-menu" use:portal role="menu" style="top: {addMenuPos.top}px; right: {addMenuPos.right}px;">
     <button class="tab-add-menu-item" role="menuitem" onclick={openExistingFileTab}>
       <FolderOpen size={12} /> <span>Open File</span>
     </button>
@@ -197,6 +232,9 @@
     <button class="tab-add-menu-item" role="menuitem" onclick={openPreviewTab}>
       <Eye size={12} /> <span>Preview</span>
     </button>
+    <button class="tab-add-menu-item" role="menuitem" onclick={openGitGraphTab}>
+      <GitBranch size={12} /> <span>Git Graph</span>
+    </button>
     <button class="tab-add-menu-item" role="menuitem" onclick={openTerminalTab}>
       <TerminalSquare size={12} /> <span>Terminal</span>
     </button>
@@ -205,8 +243,8 @@
 
 {#if ctxMenu}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="ctx-backdrop" role="presentation" onclick={closeCtx} onkeydown={(e) => e.key === 'Escape' && closeCtx()}></div>
-  <div class="ctx-menu" role="menu" bind:this={ctxMenuEl} style="left:{ctxMenu.x}px;top:{ctxMenu.y}px">
+  <div class="ctx-backdrop" use:portal role="presentation" onclick={closeCtx} onkeydown={(e) => e.key === 'Escape' && closeCtx()}></div>
+  <div class="ctx-menu" use:portal role="menu" bind:this={ctxMenuEl} style="left:{ctxMenu.x}px;top:{ctxMenu.y}px">
     <button class="ctx-item" role="menuitem" onclick={ctxPin}>
       {ctxMenu.pinned ? 'Unpin tab' : 'Pin tab'}
     </button>

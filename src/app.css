@@ -1,12 +1,15 @@
 :root {
-  --font-display: "Spectral", Georgia, serif;
-  --font-ui:
-    "IBM Plex Sans",
-    -apple-system, BlinkMacSystemFont,
-    sans-serif;
-  --font-mono:
-    "IBM Plex Mono",
-    ui-monospace, monospace;
+  /* The terminal typeface (JetBrains Mono / Nerd Font), used app-wide. */
+  --font-terminal:
+    "JetBrainsMono Nerd Font",
+    "JetBrains Mono",
+    ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* Whole app shares the terminal font; vars stay distinct so any one area
+     can be retargeted later without touching every component. */
+  --font-display: var(--font-terminal);
+  --font-ui: var(--font-terminal);
+  --font-mono: var(--font-terminal);
+  --font-sidebar: var(--font-terminal);
   --radius: 8px;
   --sidebar-width: 240px;
 }
@@ -99,6 +102,35 @@ html, body, #app {
 ::-webkit-scrollbar-thumb { background: var(--bg-surface); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--border); }
 
+/* Inline color swatches in the editor (preview of color literals). Styled
+   globally (not via CodeMirror baseTheme) so they reliably apply, with a
+   dual ring (dark outside + light inside) so the swatch edge is visible on
+   any background — including dark colors on a dark editor. */
+.cm-color-swatch {
+  display: inline-block;
+  box-sizing: border-box;
+  width: 0.92em;
+  height: 0.92em;
+  margin-right: 0.4em;
+  vertical-align: -0.13em;
+  border-radius: 3px;
+  position: relative;
+  cursor: default;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5), inset 0 0 0 1px rgba(255, 255, 255, 0.55);
+}
+.cm-color-swatch-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  opacity: 0;
+  cursor: pointer;
+}
+
 button {
   font-family: inherit;
   cursor: pointer;
@@ -134,7 +166,7 @@ input:focus, textarea:focus { border-color: var(--accent); }
   --density-titlebar-height: 28px;
   --density-tabs-height: 30px;
   --density-tree-padding: 1px 8px;
-  --density-statusbar-height: 22px;
+  --density-statusbar-height: 24px;
 }
 
 :root[data-density="comfortable"] {
@@ -143,7 +175,7 @@ input:focus, textarea:focus { border-color: var(--accent); }
   --density-titlebar-height: 32px;
   --density-tabs-height: 36px;
   --density-tree-padding: 3px 8px;
-  --density-statusbar-height: 24px;
+  --density-statusbar-height: 28px;
 }
 
 /* CodeMirror search panel */
@@ -246,4 +278,34 @@ select,
 [contenteditable="true"] {
   user-select: text;
   -webkit-user-select: text;
+}
+
+/* ── Plum glass ───────────────────────────────────────────────── *
+ * leo's signature themes (plum dark / plum light) get a subtle frosted
+ * chrome: translucent panels + a backdrop blur. The `:root` prefix gives
+ * the rules enough specificity to win over the components' scoped
+ * backgrounds without `!important`. Other themes are unaffected.
+ * ─────────────────────────────────────────────────────────────── */
+:root[data-theme="plum-dark"] .title-bar,
+:root[data-theme="plum-dark"] .toolbar,
+:root[data-theme="plum-dark"] .sidebar,
+:root[data-theme="plum-dark"] .sidebar-rail,
+:root[data-theme="plum-dark"] .statusbar,
+:root[data-theme="plum-dark"] .git-panel-container {
+  background-color: color-mix(in srgb, var(--bg-secondary) 58%, transparent);
+  backdrop-filter: blur(14px) saturate(1.3);
+  -webkit-backdrop-filter: blur(14px) saturate(1.3);
+  border-color: color-mix(in srgb, var(--border) 60%, transparent);
+}
+
+:root[data-theme="plum-light"] .title-bar,
+:root[data-theme="plum-light"] .toolbar,
+:root[data-theme="plum-light"] .sidebar,
+:root[data-theme="plum-light"] .sidebar-rail,
+:root[data-theme="plum-light"] .statusbar,
+:root[data-theme="plum-light"] .git-panel-container {
+  background-color: color-mix(in srgb, var(--bg-secondary) 70%, transparent);
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  border-color: color-mix(in srgb, var(--border) 65%, transparent);
 }

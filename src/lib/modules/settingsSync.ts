@@ -1,9 +1,13 @@
 // ── Cross-window settings sync ───────────────────────────────────
 import { autosaveEnabled, autosaveDelay, editorFontSize, editorTabSize, editorWordWrap, editorLineNumbers, editorShowErrorLens, editorVimMode, terminalFontSize, hiddenPatterns, ghostTextModel, editModel } from './settings/settings';
-import { appearanceMode, editorTheme, uiFontSize, uiDensity } from './ui/ui';
+import { appearanceMode, editorTheme, uiZoom, uiDensity } from './ui/ui';
 import { maxRecentProjects, maxTabs } from './explorer/files';
 import { aiProvider, aiModel, type AiProvider } from './ai/ai';
-import { terminalMode, terminalPanelHeight, type TerminalMode } from './terminal/shell';
+import { terminalMode, terminalPanelHeight, terminalRendererPoolEnabled, type TerminalMode } from './terminal/shell';
+import { bgImageId, bgOpacity, bgBlur } from './theme/background';
+import { activeCustomThemeId, reloadCustomThemes } from './theme/customThemes';
+import { activeAgentId, reloadCustomAgents } from './ai/agents';
+import { agentNotifications } from './notify/notify';
 import type { AppearanceMode, EditorThemeId } from './theme/themes';
 
 const SETTINGS_SYNC: Record<string, { set: (v: string | null) => void }> = {
@@ -18,17 +22,26 @@ const SETTINGS_SYNC: Record<string, { set: (v: string | null) => void }> = {
   'leo-terminal-font-size':  { set: v => terminalFontSize.set(parseInt(v || '13', 10)) },
   'leo-terminal-mode':       { set: v => terminalMode.set((v as TerminalMode) || 'tab') },
   'leo-terminal-panel-height': { set: v => terminalPanelHeight.set(parseInt(v || '260', 10)) },
+  'leo-terminal-renderer-pool': { set: v => terminalRendererPoolEnabled.set(v === 'true') },
   'leo-appearance':          { set: v => appearanceMode.set((v as AppearanceMode) || 'system') },
   'leo-editor-theme':        { set: v => editorTheme.set((v as EditorThemeId) || 'one-dark') },
-  'leo-ui-font-size':        { set: v => uiFontSize.set(parseInt(v || '13', 10)) },
+  'leo-ui-zoom':             { set: v => uiZoom.set(parseFloat(v || '1') || 1) },
   'leo-ui-density':          { set: v => uiDensity.set((v as 'compact' | 'comfortable') || 'comfortable') },
   'leo-hidden-patterns':     { set: v => { try { hiddenPatterns.set(JSON.parse(v || '[]')); } catch { /* ignore */ } } },
   'leo-max-recent-projects': { set: v => maxRecentProjects.set(parseInt(v || '3', 10)) },
   'leo-max-tabs':            { set: v => maxTabs.set(parseInt(v || '9', 10)) },
+  'leo-agent-notifications': { set: v => agentNotifications.set(v !== 'false') },
   'leo-ai-provider':         { set: v => aiProvider.set((v as AiProvider) || 'openrouter') },
   'leo-ai-model':            { set: v => aiModel.set(v || 'openrouter/auto') },
   'leo-ghost-text-model':    { set: v => ghostTextModel.set(v || '') },
   'leo-edit-model':          { set: v => editModel.set(v || '') },
+  'leo-bg-image-id':         { set: v => bgImageId.set(v || '') },
+  'leo-bg-opacity':          { set: v => bgOpacity.set(parseInt(v || '15', 10)) },
+  'leo-bg-blur':             { set: v => bgBlur.set(parseInt(v || '0', 10)) },
+  'leo-active-custom-theme': { set: v => activeCustomThemeId.set(v || '') },
+  'leo-custom-themes':       { set: () => reloadCustomThemes() },
+  'leo-active-agent':        { set: v => activeAgentId.set(v || '') },
+  'leo-custom-agents':       { set: () => reloadCustomAgents() },
 };
 
 if (typeof window !== 'undefined') {

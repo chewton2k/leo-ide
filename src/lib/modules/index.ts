@@ -12,3 +12,8 @@ export * from './settingsSync';
 export * from './logging';
 export * from './layout';
 export * from './preview';
+export * from './palette';
+export * from './statusbar';
+export * from './updater';
+export * from './notify';
+export * from './autostart';

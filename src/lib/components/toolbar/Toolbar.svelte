@@ -9,23 +9,27 @@
    * an "Open Folder" button to switch the workspace root.
    */
   import Tabs from '../tabs/Tabs.svelte';
-  import { Grid2x2, SplitSquareVertical, PanelLeft, FolderOpen, ChevronDown, Search, FilePlus2, FolderPlus } from 'lucide-svelte';
+  import { Grid2x2, SplitSquareVertical, PanelLeft, FolderOpen, ChevronDown, Search, FilePlus2, FolderPlus, Plus, GitBranch } from 'lucide-svelte';
   import {
-    showTerminal, activeFilePath, panesInActiveTab,
-    activeTerminalTabId, splitTerminalSignal, collapseTerminalSplitsSignal,
+    showTerminal, activeFilePath,
+    activeTerminalTabId, splitTerminalSignal,
     terminalPath, projectRoot,
+    shortcutBindings, formatKeysForDisplay,
   } from '../../modules';
   import { getRecentProjects, removeRecentProject, type RecentProject } from '../../modules/session';
+  import { portal } from '../../modules/ui';
   import { exists } from '@tauri-apps/plugin-fs';
 
   interface Props {
     onOpenProject?: (path: string) => void;
     onOpenFolderDialog?: () => void;
+    onNewProject?: () => void;
+    onCloneRepo?: () => void;
     onSearchFiles?: () => void;
     onNewFile?: () => void;
     onNewFolder?: () => void;
   }
-  let { onOpenProject, onOpenFolderDialog, onSearchFiles, onNewFile, onNewFolder }: Props = $props();
+  let { onOpenProject, onOpenFolderDialog, onNewProject, onCloneRepo, onSearchFiles, onNewFile, onNewFolder }: Props = $props();
 
   // ── Split button ─────────────────────────────────────────────────
 
@@ -33,15 +37,7 @@
   let splitMenuPos = $state<{ top: number; left: number } | null>(null);
   let splitBtnEl: HTMLDivElement | undefined = $state();
 
-  let splitActive = $derived($showTerminal && $panesInActiveTab > 1);
-
   function handleSplitBtn() {
-    const canCollapse = $showTerminal && $panesInActiveTab > 1;
-    if (canCollapse) {
-      collapseTerminalSplitsSignal.update(n => n + 1);
-      splitMenuOpen = false;
-      return;
-    }
     if (!splitMenuOpen) {
       const rect = splitBtnEl?.getBoundingClientRect();
       if (rect) splitMenuPos = { top: rect.bottom + 2, left: rect.left };
@@ -86,10 +82,14 @@
       projectDropdownOpen = false;
       return;
     }
-    recentProjects = await getRecentProjects();
     searchQuery = '';
     projectDropdownOpen = true;
     requestAnimationFrame(() => searchInputEl?.focus());
+    try {
+      recentProjects = await getRecentProjects();
+    } catch {
+      recentProjects = [];
+    }
   }
 
   async function selectProject(project: RecentProject) {
@@ -106,6 +106,16 @@
   function openFolderFromDropdown() {
     projectDropdownOpen = false;
     onOpenFolderDialog?.();
+  }
+
+  function newProjectFromDropdown() {
+    projectDropdownOpen = false;
+    onNewProject?.();
+  }
+
+  function cloneRepoFromDropdown() {
+    projectDropdownOpen = false;
+    onCloneRepo?.();
   }
 
   // ── Click-outside handling ───────────────────────────────────────
@@ -142,7 +152,7 @@
   </button>
 
   {#if projectDropdownOpen}
-    <div class="project-dropdown" bind:this={dropdownEl} role="menu">
+    <div class="project-dropdown" use:portal bind:this={dropdownEl} role="menu">
       <div class="dropdown-search">
         <Search size={12} class="search-icon" />
         <input
@@ -178,6 +188,14 @@
           <FolderOpen size={12} />
           Open Folder...
         </button>
+        <button class="dropdown-open-btn" onclick={newProjectFromDropdown}>
+          <Plus size={12} />
+          New Project...
+        </button>
+        <button class="dropdown-open-btn" onclick={cloneRepoFromDropdown}>
+          <GitBranch size={12} />
+          Clone Repo...
+        </button>
       </div>
     </div>
   {/if}
@@ -191,11 +209,12 @@
     <button
       type="button"
       class="toolbar-btn split-btn"
-      class:active={splitActive}
+      class:active={splitMenuOpen}
       onclick={handleSplitBtn}
-      title={splitActive ? 'Collapse terminal splits' : 'Split terminal pane'}
-      aria-label={splitActive ? 'Collapse splits' : 'Split terminal'}
-      aria-pressed={splitActive}
+      title="Split terminal pane"
+      aria-label="Split terminal"
+      aria-haspopup="menu"
+      aria-expanded={splitMenuOpen}
     >
       <Grid2x2 size={13} />
     </button>
@@ -203,16 +222,23 @@
     {#if splitMenuOpen && splitMenuPos}
       <div
         class="split-menu"
+        use:portal
         role="menu"
         style="top: {splitMenuPos.top}px; left: {splitMenuPos.left}px;"
       >
         <button class="split-menu-item" role="menuitem" onclick={() => activateSplit('right')}>
           <SplitSquareVertical size={12} />
           Split Right
+          {#if $shortcutBindings['terminal.splitRight']}
+            <kbd class="split-menu-kbd">{formatKeysForDisplay($shortcutBindings['terminal.splitRight'])}</kbd>
+          {/if}
         </button>
         <button class="split-menu-item" role="menuitem" onclick={() => activateSplit('bottom')}>
           <PanelLeft size={12} style="transform: rotate(-90deg);" />
           Split Below
+          {#if $shortcutBindings['terminal.splitDown']}
+            <kbd class="split-menu-kbd">{formatKeysForDisplay($shortcutBindings['terminal.splitDown'])}</kbd>
+          {/if}
         </button>
       </div>
     {/if}
@@ -451,5 +477,14 @@
   .split-menu-item:hover {
     background: var(--bg-tertiary);
     color: var(--text-primary);
+  }
+  .split-menu-kbd {
+    margin-left: auto;
+    padding-left: 14px;
+    font-family: var(--font-ui);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
   }
 </style>

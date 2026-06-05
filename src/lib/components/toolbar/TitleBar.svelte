@@ -17,10 +17,10 @@
    * once a few tabs are open — that was the original bug report.
    */
   import {
-    SidebarOpen, SidebarClose, GitBranch, Settings, Search, TerminalSquare,
+    SidebarOpen, SidebarClose, Settings, Search, TerminalSquare,
   } from 'lucide-svelte';
   import {
-    showSettings, showGit, gitBranch, toggleGitPanel,
+    showSettings,
     showTerminal,
     openFileSearchSignal,
   } from '../../modules';
@@ -96,21 +96,6 @@
 
   <!-- Right cluster — global toggles. -->
   <div class="cluster cluster-right">
-    <button
-      type="button"
-      class="title-btn"
-      class:active={$showGit}
-      onclick={toggleGitPanel}
-      title="Source Control (Cmd+G)"
-      aria-label="Toggle source control"
-      aria-pressed={$showGit}
-    >
-      <GitBranch size={14} />
-      {#if $gitBranch}
-        <span class="branch-label">{$gitBranch}</span>
-      {/if}
-    </button>
-
     <button
       type="button"
       class="title-btn settings-btn"
@@ -199,14 +184,6 @@
   .title-btn:focus-visible {
     outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
     outline-offset: -2px;
-  }
-
-  .branch-label {
-    font-size: 10.5px;
-    max-width: 90px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .title-search {
