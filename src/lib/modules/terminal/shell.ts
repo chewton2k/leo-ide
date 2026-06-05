@@ -1,8 +1,12 @@
 import { writable, get, derived, type Writable } from 'svelte/store';
-import { persistedString, persistedNumber } from '../session/persisted';
+import { persistedString, persistedNumber, persistedBool } from '../session/persisted';
+
+/** Opt-in: cap live terminal renderers + hibernate hidden panes (default off). */
+export const terminalRendererPoolEnabled = persistedBool('leo-terminal-renderer-pool', false);
 
 export const showTerminal = writable<boolean>(false);
 export const showPreview = writable<boolean>(false);
+export const showGitGraph = writable<boolean>(false);
 
 // ── Terminal layout mode ──────────────────────────────────────────
 //
@@ -24,6 +28,7 @@ export const terminalPanelHeight = persistedNumber('leo-terminal-panel-height', 
 
 export const TERMINAL_SENTINEL_PREFIX = '__terminal__';
 export const PREVIEW_PATH = '__preview__';
+export const GIT_GRAPH_PATH = '__gitgraph__';
 export const DIAGRAM_PREFIX = '__diagram__:';
 export const DIFF_PREFIX = '__diff__:';
 
@@ -38,6 +43,10 @@ export function isTerminalPath(path: string | null): boolean {
 
 export function isPreviewPath(path: string | null): boolean {
   return path === PREVIEW_PATH;
+}
+
+export function isGitGraphPath(path: string | null): boolean {
+  return path === GIT_GRAPH_PATH;
 }
 
 export function isDiagramPath(path: string | null): boolean {
@@ -78,6 +87,16 @@ export function terminalTabIdFromPath(path: string | null): number | null {
   return Number.isNaN(n) ? null : n;
 }
 
+/**
+ * terminal in `…/projects/leo` shows as `leo` and updates as you `cd`).
+ * Falls back to `fallback` when no cwd is known yet. Handles `\` and `/`.
+ */
+export function terminalTabLabel(cwd: string | null | undefined, fallback: string): string {
+  if (!cwd) return fallback;
+  const parts = cwd.split(/[\\/]/).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : fallback;
+}
+
 // ── Pane-level session info (one entry per PTY) ────────────────────
 
 export interface TerminalSessionInfo {
@@ -103,6 +122,22 @@ export const terminalTabs = writable<TerminalTabInfo[]>([]);
 /** The last-focused terminal tab id. Persists even while the user views a
  *  file tab, so Ctrl+` can restore focus to the same terminal. */
 export const activeTerminalTabId = writable<number | null>(null);
+
+/** Working directory of the currently-focused terminal pane (OSC 7 reported).
+ *  Drives the file-tree root so the explorer follows the active terminal's cwd.
+ *  null = no terminal cwd yet (fall back to project root / home). */
+export const activeTerminalCwd = writable<string | null>(null);
+
+/** One-shot spawn-dir override: when set, the NEXT terminal pane spawns here
+ *  instead of the project root. Used on session restore to resume the terminal
+ *  in the working directory it was left in. Consumed (cleared) on first use. */
+export const pendingTerminalCwd = writable<string | null>(null);
+
+/** Whether the explorer should re-root to follow a reported terminal cwd:
+ *  only when there is a cwd and it differs from the current root. */
+export function shouldFollowCwd(currentRoot: string | null, cwd: string | null): boolean {
+  return !!cwd && cwd !== currentRoot;
+}
 
 // Monotonic counter for tab ids (separate from pane ids, which are chosen by
 // the backend). Kept in a closure so tests or reloads restart at 1.
@@ -134,6 +169,11 @@ export const createTerminalSignal = writable<{
   forceNew: boolean;
 }>({ count: 0, forceNew: false });
 
+/** Bumped to close all terminals and respawn one fresh in the current
+ *  project root — used when switching projects so the terminal starts in
+ *  the newly-opened directory instead of a lingering cwd. */
+export const resetTerminalSignal = writable<number>(0);
+
 /** Kill a specific pane by id, all panes in a tab, or everything. */
 export const killTerminalSignal = writable<
   | { kind: 'pane'; id: number }
@@ -148,6 +188,13 @@ export const splitTerminalSignal = writable<{
 }>({ count: 0, direction: 'right' });
 
 export const collapseTerminalSplitsSignal = writable<number>(0);
+
+/** Bumped to cd the focused terminal pane to a directory (from the cwd
+ *  breadcrumb). Terminal.svelte writes a `cd` command to the active pane. */
+export const terminalCdSignal = writable<{ count: number; path: string }>({ count: 0, path: '' });
+
+/** Bumped to open the in-terminal search bar (e.g. from the command palette). */
+export const terminalSearchSignal = writable<number>(0);
 
 // ── Diagram tabs (unrelated — kept here for historical reasons) ────
 

@@ -17,6 +17,8 @@
  *     the user is already focused on a terminal tab.
  */
 import { get } from 'svelte/store';
+import { invoke } from '@tauri-apps/api/core';
+import { ask } from '@tauri-apps/plugin-dialog';
 import {
   showTerminal,
   terminalMode,
@@ -56,4 +58,33 @@ export function toggleTerminal(): void {
   } else {
     showTerminal.set(false);
   }
+}
+
+
+/**
+ * Whether it's OK to close a terminal pane. If a foreground process is still
+ * running, prompts the user. Fails open (allows closing) on any error.
+ */
+export async function confirmTerminalClose(sessionId: number): Promise<boolean> {
+  let hasForeground = false;
+  try {
+    hasForeground = await invoke<boolean>('pty_has_foreground_process', { id: sessionId });
+  } catch { return true; }
+  if (!hasForeground) return true;
+  try {
+    return await ask('A process is still running in this terminal. Close it anyway?', {
+      title: 'Close terminal',
+      kind: 'warning',
+    });
+  } catch { return true; }
+}
+
+/** Single-quote a path for safe shell insertion (escapes embedded single quotes). */
+export function quotePathForShell(path: string): string {
+  return `'${path.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Build the text to insert into a terminal for one or more dropped paths. */
+export function buildDropText(paths: string[]): string {
+  return paths.map(quotePathForShell).join(' ');
 }

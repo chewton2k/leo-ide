@@ -1,19 +1,36 @@
 <script lang="ts">
-  import { onMount, onDestroy, tick } from 'svelte';
+  import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { Terminal as XTerm } from '@xterm/xterm';
   import { FitAddon } from '@xterm/addon-fit';
   import { WebLinksAddon } from '@xterm/addon-web-links';
+  import { SearchAddon } from '@xterm/addon-search';
+  import { WebglAddon } from '@xterm/addon-webgl';
+  import { SerializeAddon } from '@xterm/addon-serialize';
   import { open } from '@tauri-apps/plugin-shell';
   import {
     projectRoot, terminalFontSize, appearanceMode, showTerminal,
-    activeFilePath, openFiles,
-    terminalSessions, terminalTabs, activeTerminalTabId,
-    createTerminalSignal, killTerminalSignal,
+    activeFilePath, openFiles, uiZoom,
+    terminalSessions, terminalTabs, activeTerminalTabId, activeTerminalCwd, pendingTerminalCwd,
+    createTerminalSignal, killTerminalSignal, resetTerminalSignal,
     splitTerminalSignal, collapseTerminalSplitsSignal,
+    terminalCdSignal,
+    terminalSearchSignal,
     isTerminalPath, terminalPath, terminalTabIdFromPath, allocateTerminalTabId,
+    terminalTabLabel,
     terminalMode,
+    registerOscHandlers,
+    registerAgentDetect, agentTerminalStatus,
+    notify,
+    confirmTerminalClose,
+    buildDropText,
+    quotePathForShell,
+    RendererPool, terminalRendererPoolEnabled,
+    siblingLeaf,
+    planPaneFocus,
+    setActivePaneId,
+    type PaneFocusReason,
     type TerminalTabInfo,
   } from '../../modules';
   import { get } from 'svelte/store';
@@ -31,10 +48,15 @@
     name: string;
     xterm: XTerm;
     fitAddon: FitAddon;
+    searchAddon: SearchAddon;
+    webglAddon?: WebglAddon;
+    serializeAddon: SerializeAddon;
     unlisten: UnlistenFn;
     unlistenExit: UnlistenFn;
     resizeObserver: ResizeObserver | null;
     mounted: boolean;
+    oscDispose?: () => void;
+    agentDispose?: () => void;
   }
 
   type Rect = { top: number; left: number; width: number; height: number };
@@ -46,6 +68,12 @@
   // ── State ────────────────────────────────────────────────────────
 
   let terminalRoot: HTMLDivElement;
+  let dropActive = $state(false);
+  // Set on teardown so the async `document.fonts.ready` handler doesn't touch
+  // disposed xterm instances.
+  let destroyed = false;
+  // Caps live WebGL contexts when the renderer-pool flag is on (off = no-op).
+  const webglPool = new RendererPool();
   let panes = $state<TerminalPane[]>([]);
 
   /** Per-tab split tree. Empty tabs have no entry. */
@@ -53,7 +81,44 @@
   /** Per-tab active pane id. Updated on click/focus/split/close. */
   let activePaneByTab = $state<Record<number, number | null>>({});
 
+  let paneCwd = $state<Record<number, string>>({});
+
   let contextMenu = $state<{ x: number; y: number; paneId: number | null; tabId: number } | null>(null);
+
+  // ── In-pane search (@xterm/addon-search) ──
+  let searchVisible = $state(false);
+  let searchQuery = $state('');
+  let searchInputEl = $state<HTMLInputElement | undefined>();
+
+  // ── Scrollback restore (@xterm/addon-serialize) ──
+  function activePaneObj(): TerminalPane | null {
+    return panes.find(p => p.id === currentActivePaneId) ?? null;
+  }
+
+  function openTerminalSearch() {
+    searchVisible = true;
+    requestAnimationFrame(() => searchInputEl?.select());
+  }
+  function runSearch(forward = true) {
+    const p = activePaneObj();
+    if (!p || !searchQuery) return;
+    if (forward) p.searchAddon.findNext(searchQuery);
+    else p.searchAddon.findPrevious(searchQuery);
+  }
+  function closeTerminalSearch() {
+    searchVisible = false;
+    searchQuery = '';
+    activePaneObj()?.xterm.focus();
+  }
+  function onSearchKey(e: KeyboardEvent) {
+    if (e.key === 'Enter') { e.preventDefault(); runSearch(!e.shiftKey); }
+    else if (e.key === 'Escape') { e.preventDefault(); closeTerminalSearch(); }
+  }
+
+  // Command-palette trigger.
+  $effect(() => {
+    if ($terminalSearchSignal > 0) openTerminalSearch();
+  });
   let contextMenuEl = $state<HTMLDivElement | undefined>();
 
   /** Serialize pane-mutation ops so rapid split/close clicks don't interleave. */
@@ -134,7 +199,10 @@
     splitTrees = { ...splitTrees, [tabId]: tree };
   }
   function setActivePane(tabId: number, paneId: number | null) {
-    activePaneByTab = { ...activePaneByTab, [tabId]: paneId };
+    // Idempotent: keep the SAME object reference when unchanged so the
+    // `$activeFilePath` effect (which reads `activePaneByTab`) doesn't re-run
+    // on no-op focus calls and spin up a self-sustaining focus rAF loop.
+    activePaneByTab = setActivePaneId(activePaneByTab, tabId, paneId);
   }
   function removeTabState(tabId: number) {
     const { [tabId]: _tree, ...restTrees } = splitTrees;
@@ -176,7 +244,7 @@
     contextMenu = null;
     if (tabId == null) return;
     if (action === 'collapse') enqueue(() => collapseToActivePane(tabId));
-    else if (action === 'close' && paneId != null) enqueue(() => closePane(paneId));
+    else if (action === 'close' && paneId != null) enqueue(async () => { if (await confirmTerminalClose(paneId)) await closePane(paneId); });
     else if (action === 'right' || action === 'bottom') {
       if (paneId != null) setActivePane(tabId, paneId);
       enqueue(() => splitTerminal(action, tabId));
@@ -226,6 +294,13 @@
     activeFilePath.set(terminalPath(tabId));
   }
 
+  /** The terminal
+   *  is exempt from CSS zoom for correct selection, so it scales via xterm's
+   *  native font size instead — which remeasures cells correctly. */
+  function effectiveFontSize(base: number, zoom: number): number {
+    return Math.max(4, Math.round(base * (zoom || 1)));
+  }
+
   function fitPane(pane: TerminalPane) {
     if (!pane.mounted) return;
     const mount = getPaneMount(pane.id);
@@ -233,20 +308,51 @@
     try { pane.fitAddon.fit(); } catch { /* Legitimate: xterm may not be attached to DOM yet */ }
   }
 
-  function focusPane(id: number) {
+  /**
+   * Force xterm to re-measure its character-cell size, then refit. xterm
+   * measures the cell once on creation; if the terminal font (JetBrains Mono,
+   * loaded async as a web font) wasn't ready yet, that measurement is taken
+   * with a fallback font whose line-height differs — which makes mouse
+   * selection map to the wrong rows (drifting further down the screen).
+   * Toggling `fontFamily` re-triggers xterm's CharSizeService measurement.
+   */
+  function remeasurePane(pane: TerminalPane) {
+    if (!pane.mounted) return;
+    const fam = getComputedStyle(document.documentElement).getPropertyValue('--font-terminal').trim()
+      || "ui-monospace, 'SF Mono', Menlo, Monaco, Consolas, monospace";
+    try {
+      pane.xterm.options.fontFamily = `${fam}, monospace`;
+      pane.xterm.options.fontFamily = fam;
+    } catch { /* disposed */ }
+    fitPane(pane);
+  }
+
+  function focusPane(id: number, reason: PaneFocusReason = 'programmatic') {
     const pane = panes.find((entry) => entry.id === id);
     if (!pane) return;
+    const plan = planPaneFocus({
+      activeTabId: get(activeTerminalTabId),
+      activePaneIdForTab: activePaneByTab[pane.tabId],
+      targetTabId: pane.tabId,
+      targetPaneId: id,
+      reason,
+    });
     setActivePane(pane.tabId, id);
     // Focus also implies making that tab the active terminal tab.
     if (get(activeTerminalTabId) !== pane.tabId) {
       activeTerminalTabId.set(pane.tabId);
     }
-    requestAnimationFrame(() => {
+    // Re-root the file tree to the newly-focused pane's cwd (per-pane state).
+    if (paneCwd[id]) activeTerminalCwd.set(paneCwd[id]);
+    if (plan.focus === 'none') return;
+    const runFocus = () => {
       fitPane(pane);
       if (pane.mounted) {
         try { pane.xterm.focus(); } catch { /* Legitimate: terminal may not be visible */ }
       }
-    });
+    };
+    if (plan.focus === 'immediate') runFocus();
+    else requestAnimationFrame(runFocus);
   }
 
   function enqueue<T>(task: () => Promise<T>): Promise<T> {
@@ -335,19 +441,28 @@
     splitFrom?: number;
     direction?: 'horizontal' | 'vertical';
   }): Promise<TerminalPane | null> {
-    const cwd = get(projectRoot);
+    // One-shot restore override: resume the terminal in its saved cwd, else
+    // spawn at the project root. Consumed immediately so later panes don't
+    // inherit it.
+    const override = get(pendingTerminalCwd);
+    if (override) pendingTerminalCwd.set(null);
+    const cwd = override ?? get(projectRoot);
     const { tabId } = target;
 
     const xterm = new XTerm({
       cursorBlink: true,
-      fontSize: get(terminalFontSize),
-      fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--font-mono').trim()
+      fontSize: effectiveFontSize(get(terminalFontSize), get(uiZoom)),
+      fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--font-terminal').trim()
         || "ui-monospace, 'SF Mono', Menlo, Monaco, Consolas, monospace",
       theme: buildXtermTheme(),
     });
 
     const fitAddon = new FitAddon();
     xterm.loadAddon(fitAddon);
+    const searchAddon = new SearchAddon();
+    xterm.loadAddon(searchAddon);
+    const serializeAddon = new SerializeAddon();
+    xterm.loadAddon(serializeAddon);
     xterm.loadAddon(new WebLinksAddon((_event, uri) => {
       if (uri.startsWith('http://') || uri.startsWith('https://')) open(uri);
     }));
@@ -392,6 +507,7 @@
         if (e.metaKey && e.key === 'ArrowLeft') { invoke('write_terminal', { id: sessionId, data: '\x01' }); return false; }
         if (e.metaKey && e.key === 'ArrowRight') { invoke('write_terminal', { id: sessionId, data: '\x05' }); return false; }
         if (e.altKey && e.key === 'Backspace') { invoke('write_terminal', { id: sessionId, data: '\x17' }); return false; }
+        if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 'f' || e.key === 'F')) { openTerminalSearch(); return false; }
         return true;
       });
 
@@ -411,6 +527,8 @@
       name,
       xterm,
       fitAddon,
+      searchAddon,
+      serializeAddon,
       unlisten,
       unlistenExit,
       resizeObserver: null,
@@ -418,6 +536,31 @@
     };
 
     panes = [...panes, pane];
+    // Seed with the spawn dir so focusing this pane re-roots the explorer
+    // immediately, even before the shell's first OSC 7 cwd report arrives.
+    if (cwd) paneCwd = { ...paneCwd, [sessionId]: cwd };
+    pane.oscDispose = registerOscHandlers(xterm, (reported) => {
+      paneCwd = { ...paneCwd, [pane.id]: reported };
+      if (get(activeTerminalTabId) === pane.tabId && activePaneByTab[pane.tabId] === pane.id) {
+        activeTerminalCwd.set(reported);
+      }
+    });
+    pane.agentDispose = registerAgentDetect(xterm, (sig) => {
+      if (sig === 'finished') {
+        agentTerminalStatus.set('finished');
+        if (typeof document !== 'undefined' && !document.hasFocus()) void notify('Agent finished');
+      } else if (sig === 'attention') {
+        agentTerminalStatus.set('attention');
+      } else {
+        agentTerminalStatus.set('working');
+      }
+    });
+
+    // Listeners + OSC handler are now attached — tell the backend to start
+    // streaming. Deferring until here means the shell's startup output (incl.
+    // its first OSC 7 cwd report) can't be dropped by a spawn/listen race, so
+    // the explorer follows this terminal's cwd without needing a command first.
+    invoke('terminal_ready', { id: sessionId }).catch(() => { /* session may have been killed */ });
 
     // Update the split tree for this tab.
     const currentTree = splitTrees[tabId] ?? null;
@@ -448,11 +591,47 @@
     if (mount) {
       xterm.open(mount);
       pane.mounted = true;
+      // GPU renderer is opt-in and pooled: creating an uncapped WebGL
+      // context per pane makes the OS drop the OLDEST context when you
+      // split (esp. WKWebView on macOS), freezing the original pane. With
+      // the pool off we stay on xterm's default renderer (robust, no
+      // context limit). With the pool on, contexts are capped + evicted.
+      try {
+        if (get(terminalRendererPoolEnabled)) {
+          const evicted = webglPool.acquire(pane.id);
+          if (evicted !== null) {
+            const ev = panes.find(p => p.id === evicted);
+            if (ev?.webglAddon) { ev.webglAddon.dispose(); ev.webglAddon = undefined; }
+          }
+          const webgl = new WebglAddon();
+          webgl.onContextLoss(() => { webgl.dispose(); pane.webglAddon = undefined; webglPool.release(pane.id); });
+          xterm.loadAddon(webgl);
+          pane.webglAddon = webgl;
+        }
+      } catch { /* stay on DOM renderer */ }
+      // Restore prior-session scrollback into the first terminal opened.
       fitPane(pane);
       await new Promise((r) => requestAnimationFrame(r));
       fitPane(pane);
 
-      const resizeObserver = new ResizeObserver(() => fitPane(pane));
+      // If this pane opened before the terminal web font (JetBrains Mono)
+      // finished loading, xterm measured the char cell against a fallback,
+      // which offsets mouse selection. Re-measure once fonts are ready.
+      if (typeof document !== 'undefined' && document.fonts?.ready) {
+        document.fonts.ready.then(() => { if (!destroyed && pane.mounted) remeasurePane(pane); });
+      }
+
+      // Skip fits for panes whose tab is not currently active. Every
+      // tab-layer is positioned `inset:0` so all panes' mount divs
+      // resize together when the terminal container resizes — without
+      // this guard, opening 5+ tabs would fire dozens of expensive
+      // fit() calls on every window/panel resize. Inactive tabs are
+      // re-fit by the `paneRects` $effect when they become active, so
+      // skipping here is safe and the user never sees a stale layout.
+      const resizeObserver = new ResizeObserver(() => {
+        if (pane.tabId !== get(activeTerminalTabId)) return;
+        fitPane(pane);
+      });
       resizeObserver.observe(mount);
       pane.resizeObserver = resizeObserver;
     }
@@ -477,6 +656,10 @@
     pane.unlisten();
     pane.unlistenExit();
     pane.resizeObserver?.disconnect();
+    pane.oscDispose?.();
+    pane.agentDispose?.();
+    agentTerminalStatus.set(null);
+    webglPool.release(pane.id);
     pane.xterm.dispose();
 
     if (killBackend) {
@@ -485,7 +668,10 @@
 
     const remaining = panes.filter((entry) => entry.id !== paneId);
     panes = remaining;
+    const { [paneId]: _droppedCwd, ...restCwd } = paneCwd;
+    paneCwd = restCwd;
 
+    const prevTree = splitTrees[tabId] ?? null;
     const newTree = removeLeaf(splitTrees[tabId] ?? null, paneId);
     setSplitTree(tabId, newTree);
 
@@ -514,7 +700,9 @@
       // Other panes remain in this tab — pick a new active pane.
       const prevActive = activePaneByTab[tabId];
       if (prevActive === paneId) {
-        setActivePane(tabId, tabPanes[0].id);
+        const sibling = siblingLeaf(prevTree, paneId);
+        const next = sibling != null && tabPanes.some(p => p.id === sibling) ? sibling : tabPanes[0].id;
+        setActivePane(tabId, next);
       }
       // Refit remaining panes after layout change. Double-rAF ensures
       // the browser has completed the layout pass with the new pane
@@ -572,6 +760,24 @@
     })));
   });
 
+  // terminal in `…/projects/leo` shows as `leo` and re-labels as you `cd`.
+  // Triggers on pane/cwd changes only; `terminalTabs` is read UNTRACKED so the
+  // store write below can't re-trigger this effect (which would loop and throw
+  // `effect_update_depth_exceeded`, freezing the whole UI).
+  $effect(() => {
+    activePaneByTab; paneCwd; // tracked deps
+    const tabs = get(terminalTabs);
+    let changed = false;
+    const next = tabs.map(t => {
+      const active = activePaneByTab[t.id];
+      const cwd = active != null ? paneCwd[active] : undefined;
+      const name = terminalTabLabel(cwd, t.name);
+      if (name !== t.name) { changed = true; return { ...t, name }; }
+      return t;
+    });
+    if (changed) terminalTabs.set(next);
+  });
+
   // Keep `activeTerminalTabId` in sync with `activeFilePath` when the user
   // clicks a terminal tab in the top bar.
   $effect(() => {
@@ -581,11 +787,19 @@
     if (tabIdFromPath != null && tabIdFromPath !== get(activeTerminalTabId)) {
       activeTerminalTabId.set(tabIdFromPath);
     }
-    // Re-focus the active pane for this tab.
-    const current = tabIdFromPath != null ? activePaneByTab[tabIdFromPath] : null;
-    if (current != null) {
-      requestAnimationFrame(() => focusPane(current));
-    }
+    // Re-focus the active pane for this tab. Read `activePaneByTab` UNTRACKED:
+    // this effect must fire only when the routed terminal *tab* changes, never
+    // when the active *pane* mutates. Tracking the pane would make `focusPane`
+    // → `setActivePane` re-trigger this effect, scheduling a fresh
+    // `requestAnimationFrame(focusPane)` every run — a self-sustaining loop
+    // whose stale captured pane id steals focus back to the newest pane in
+    // tab mode (clicking the original split pane then never keeps the cursor).
+    untrack(() => {
+      const current = tabIdFromPath != null ? activePaneByTab[tabIdFromPath] : null;
+      if (current != null) {
+        requestAnimationFrame(() => focusPane(current));
+      }
+    });
   });
 
   // createTerminalSignal: create a new tab if requested, or ensure ≥1 tab exists.
@@ -639,6 +853,21 @@
     }
   });
 
+  let cdCount = 0;
+  $effect(() => {
+    const sig = $terminalCdSignal;
+    if (sig.count <= cdCount) return;
+    cdCount = sig.count;
+    if (!sig.path) return;
+    const tabId = get(activeTerminalTabId);
+    if (tabId == null) return;
+    const paneId = activePaneByTab[tabId];
+    const pane = panes.find(p => p.id === paneId) ?? panes.find(p => p.tabId === tabId);
+    if (!pane) return;
+    invoke('write_terminal', { id: pane.sessionId, data: `cd ${quotePathForShell(sig.path)}\r` }).catch(() => { /* PTY gone */ });
+    focusPane(pane.id, 'user');
+  });
+
   // killTerminalSignal: handle 'pane', 'tab', 'all' variants.
   $effect(() => {
     const target = $killTerminalSignal;
@@ -651,6 +880,34 @@
         await closeTab(target.id);
       } else {
         await closePane(target.id);
+      }
+    });
+  });
+
+  // Reset: close every terminal and spawn one fresh in the current project
+  // root (createTab spawns at get(projectRoot)). Atomic so the close always
+  // precedes the respawn (no effect-ordering race).
+  let resetCount = 0;
+  $effect(() => {
+    const n = $resetTerminalSignal;
+    if (n <= resetCount) return;
+    resetCount = n;
+    enqueue(async () => {
+      await closeAllTabs();
+      await createTab();
+    });
+  });
+
+  // Apply the (zoom-scaled) terminal font size whenever the base size or UI
+  // zoom changes. Setting xterm's fontSize remeasures cells correctly (unlike
+  // CSS zoom), so selection stays accurate while the terminal scales with the
+  // app zoom. Read `panes` untracked so this fires only on size/zoom changes.
+  $effect(() => {
+    const size = effectiveFontSize($terminalFontSize, $uiZoom);
+    untrack(() => {
+      for (const pane of panes) {
+        pane.xterm.options.fontSize = size;
+        fitPane(pane);
       }
     });
   });
@@ -672,31 +929,44 @@
     });
   });
 
-  // Auto-focus the active pane when the terminal becomes visible. In tab
-  // mode we key off `isTerminalPath($activeFilePath)` (the user just
-  // clicked a terminal tab). In panel mode the editor's path is
-  // independent, so we instead focus whenever the panel is shown and has
-  // an active pane — this mirrors VSCode's behavior when you toggle the
-  // bottom panel.
+  // Auto-focus the active pane only when the terminal becomes visible
+  // OR the user switches to a different terminal tab.
+  //
+  // Why we DON'T re-focus on every reactive ping:
+  //   The previous version fired whenever `currentActivePaneId`,
+  //   `$activeFilePath`, `$showTerminal`, or `$terminalMode` changed.
+  //   In panel mode this meant any unrelated reactive update (e.g. the
+  //   `panes` list mutating) would re-focus the active xterm, which
+  //   stole focus from inputs elsewhere in the app — most visibly the
+  //   file-tree create-folder input, whose `onblur` handler then
+  //   canceled the in-progress folder creation. We track the previous
+  //   visibility + tab so focus is only forced on actual transitions:
+  //     • hidden → visible                  (panel opening, terminal-tab click)
+  //     • active tab-id changes while shown (panel tab-strip click)
+  //   All other cases (creating a new pane, clicking another pane,
+  //   splitting) call `focusPane` directly, so no auto-focus needed.
+  let lastTerminalVisible = false;
+  let lastTabId: number | null = null;
   $effect(() => {
     const inTerminalTab = $terminalMode === 'tab' && isTerminalPath($activeFilePath);
     const panelShown = $terminalMode === 'panel';
-    if ($showTerminal && (inTerminalTab || panelShown) && currentActivePaneId !== null) {
+    const visible = $showTerminal && (inTerminalTab || panelShown);
+    const tabId = currentTabId;
+
+    const visibilityTransitioned = visible && !lastTerminalVisible;
+    const tabSwitched = visible && tabId !== null && tabId !== lastTabId;
+
+    if ((visibilityTransitioned || tabSwitched) && currentActivePaneId !== null) {
       const paneId = currentActivePaneId;
       requestAnimationFrame(() => focusPane(paneId));
     }
+    lastTerminalVisible = visible;
+    lastTabId = tabId;
   });
 
   // ── Lifecycle ────────────────────────────────────────────────────
 
   onMount(() => {
-    const unsubFont = terminalFontSize.subscribe((size) => {
-      for (const pane of panes) {
-        pane.xterm.options.fontSize = size;
-        fitPane(pane);
-      }
-    });
-
     const unsubTheme = appearanceMode.subscribe(() => {
       const theme = buildXtermTheme();
       for (const pane of panes) {
@@ -704,13 +974,36 @@
       }
     });
 
+    // OS file-drop: insert quoted path(s) into the pane under the cursor.
+    // Position-gated so it only acts over the terminal (FileTree handles
+    // drops elsewhere). FileTree skips its import when the drop is over us.
+    const paneAtPoint = (pos: { x: number; y: number }) => {
+      const el = document.elementFromPoint(pos.x, pos.y)?.closest('[data-pane-terminal]');
+      const id = el ? Number(el.getAttribute('data-pane-terminal')) : NaN;
+      return Number.isNaN(id) ? null : panes.find(p => p.id === id) ?? null;
+    };
+    const dropUnlisteners: Array<() => void> = [];
+    void (async () => {
+      dropUnlisteners.push(await listen<{ position: { x: number; y: number } }>('tauri://drag-over', (e) => {
+        dropActive = !!paneAtPoint(e.payload.position);
+      }));
+      dropUnlisteners.push(await listen<{ paths: string[]; position: { x: number; y: number } }>('tauri://drag-drop', async (e) => {
+        dropActive = false;
+        const pane = paneAtPoint(e.payload.position);
+        if (!pane || !e.payload.paths?.length) return;
+        try { await invoke('write_terminal', { id: pane.sessionId, data: buildDropText(e.payload.paths) + ' ' }); } catch { /* PTY gone */ }
+      }));
+      dropUnlisteners.push(await listen('tauri://drag-leave', () => { dropActive = false; }));
+    })();
+
     return () => {
-      unsubFont();
       unsubTheme();
+      for (const u of dropUnlisteners) u();
     };
   });
 
   onDestroy(() => {
+    destroyed = true;
     // Kill backend PTY processes immediately. Doing this here (rather
     // than via the async killTerminalSignal flow) avoids a race where
     // deferred close operations from this component fire AFTER a
@@ -724,6 +1017,9 @@
       pane.unlisten();
       pane.unlistenExit();
       pane.resizeObserver?.disconnect();
+      pane.oscDispose?.();
+      pane.agentDispose?.();
+      webglPool.release(pane.id);
       pane.xterm.dispose();
     }
     terminalSessions.set([]);
@@ -736,6 +1032,25 @@
 <div class="terminal-panel">
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="terminal-content" role="application" bind:this={terminalRoot} oncontextmenu={handleContextMenu}>
+    {#if dropActive}
+      <div class="term-drop-overlay">Drop to paste path</div>
+    {/if}
+    {#if searchVisible}
+      <div class="term-search">
+        <input
+          bind:this={searchInputEl}
+          bind:value={searchQuery}
+          class="term-search-input"
+          placeholder="Find in terminal…"
+          spellcheck="false"
+          oninput={() => runSearch(true)}
+          onkeydown={onSearchKey}
+        />
+        <button class="term-search-btn" title="Previous (Shift+Enter)" onclick={() => runSearch(false)}>↑</button>
+        <button class="term-search-btn" title="Next (Enter)" onclick={() => runSearch(true)}>↓</button>
+        <button class="term-search-btn" title="Close (Esc)" onclick={closeTerminalSearch}>✕</button>
+      </div>
+    {/if}
     {#if $terminalTabs.length === 0}
       <div class="terminal-placeholder">Open a terminal to start a session.</div>
     {/if}
@@ -754,14 +1069,34 @@
         {#each tabPanes as pane (pane.id)}
           {@const rect = rectsForTab[pane.id]}
           {#if rect}
+            <!--
+              Why `onpointerdown` instead of `onclick` to update active state:
+              xterm registers a `mousedown` listener on its element that
+              calls `e.preventDefault()` and synchronously focuses its
+              own helper textarea. `pointerdown` fires BEFORE `mousedown`
+              for the same input event, so we update `activePaneByTab`
+              before xterm processes its mouse handling — making the
+              active-pane state always consistent with the focused xterm
+              instance.
+
+              `onfocusin` covers the cases pointerdown misses: keyboard
+              tab-navigation into a pane, screen-reader-driven focus,
+              and programmatic focus (e.g. xterm refocusing itself
+              after a paste). focus events bubble as `focusin`, so a
+              listener on the wrapper sees focus changes that happen
+              anywhere inside the pane.
+            -->
             <div
               class="terminal-pane"
               class:active={isActive && currentActivePaneId === pane.id}
               style="top:{rect.top}%;left:{rect.left}%;width:{rect.width}%;height:{rect.height}%"
               role="button"
               tabindex="0"
-              onclick={() => focusPane(pane.id)}
-              onkeydown={(e) => e.key === 'Enter' && focusPane(pane.id)}
+              aria-label="Terminal pane {pane.name}"
+              aria-pressed={isActive && currentActivePaneId === pane.id}
+              onpointerdowncapture={() => focusPane(pane.id, 'user')}
+              onfocusin={() => focusPane(pane.id, 'user')}
+              onkeydown={(e) => e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), focusPane(pane.id, 'user'))}
             >
               <div class="pane-body" data-pane-terminal={pane.id}></div>
             </div>
@@ -810,7 +1145,54 @@
     position: relative;
     background: var(--border);
     overflow: hidden;
+    zoom: calc(1 / var(--app-zoom, 1));
   }
+
+  .term-drop-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border: 2px dashed var(--accent);
+    pointer-events: none;
+  }
+
+  .term-search {
+    position: absolute;
+    top: 6px;
+    right: 12px;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 6px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  }
+  .term-search-input {
+    width: 180px;
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 4px 8px;
+    font-size: 12px;
+    outline: none;
+  }
+  .term-search-input:focus { border-color: var(--settings-icon, #B34B3C); }
+  .term-search-btn {
+    display: flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px; border-radius: 5px;
+    color: var(--text-muted); cursor: pointer; font-size: 12px;
+  }
+  .term-search-btn:hover { background: var(--bg-surface); color: var(--text-primary); }
 
   /* One absolutely-positioned layer per terminal tab. Only the active layer
      is visible — inactive layers keep their xterm DOM mounted so PTYs stay
@@ -842,6 +1224,9 @@
     border: 0.5px solid var(--border);
   }
 
+  .terminal-pane:focus-visible {
+    outline: none;
+  }
   .pane-body {
     flex: 1;
     min-width: 0;
