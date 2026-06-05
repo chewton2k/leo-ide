@@ -42,16 +42,13 @@
   import { bindAiDiffResolve } from '../../modules/editor/aiDiffEvents';
   import { ghostTextExtension } from '../../modules/editor/ghostText';
   import { scrollbarAnnotations, setScrollbarRanges, type ScrollbarRange } from '../../modules/editor/scrollbarAnnotations';
+  import { colorSwatches } from '../../modules/editor/colorSwatches';
   import { pendingEdits, approveEdit, rejectEdit, addEdits } from '../../modules/ai/pendingEdits';
   import { log } from '../../modules/logging';
 
   function buildEditorTheme(id: EditorThemeId): import('@codemirror/state').Extension {
     const themes: Record<EditorThemeId, () => import('@codemirror/state').Extension> = {
       'one-dark': () => oneDark,
-      'dracula': () => buildThemeExt(
-        { bg: '#282a36', fg: '#f8f8f2', sel: '#44475a', cursor: '#f8f8f2', gutter: '#21222c', gutterFg: '#6272a4', line: '#44475a33' },
-        { keyword: '#ff79c6', string: '#f1fa8c', comment: '#6272a4', function: '#50fa7b', variable: '#f8f8f2', number: '#bd93f9', type: '#8be9fd', operator: '#ff79c6' }
-      ),
       'github-dark': () => buildThemeExt(
         { bg: '#0d1117', fg: '#e6edf3', sel: '#264f78', cursor: '#e6edf3', gutter: '#010409', gutterFg: '#6e7681', line: '#161b2233' },
         { keyword: '#ff7b72', string: '#a5d6ff', comment: '#8b949e', function: '#d2a8ff', variable: '#e6edf3', number: '#79c0ff', type: '#79c0ff', operator: '#ff7b72' }
@@ -68,10 +65,6 @@
         { bg: '#1e1e2e', fg: '#cdd6f4', sel: '#45475a', cursor: '#cdd6f4', gutter: '#181825', gutterFg: '#6c7086', line: '#31324433' },
         { keyword: '#cba6f7', string: '#a6e3a1', comment: '#6c7086', function: '#89b4fa', variable: '#cdd6f4', number: '#fab387', type: '#94e2d5', operator: '#89dceb' }
       ),
-      'rose-pine': () => buildThemeExt(
-        { bg: '#191724', fg: '#e0def4', sel: '#403d52', cursor: '#e0def4', gutter: '#1f1d2e', gutterFg: '#6e6a86', line: '#26233a33' },
-        { keyword: '#c4a7e7', string: '#f6c177', comment: '#6e6a86', function: '#9ccfd8', variable: '#e0def4', number: '#ebbcba', type: '#9ccfd8', operator: '#31748f' }
-      ),
       'github-light': () => buildThemeExt(
         { bg: '#ffffff', fg: '#24292e', sel: '#c8c8fa', cursor: '#24292e', gutter: '#f6f8fa', gutterFg: '#8b949e', line: '#f6f8fa' },
         { keyword: '#cf222e', string: '#0a3069', comment: '#6e7781', function: '#8250df', variable: '#24292e', number: '#0550ae', type: '#0550ae', operator: '#cf222e' }
@@ -85,8 +78,8 @@
         { keyword: '#859900', string: '#2aa198', comment: '#93a1a1', function: '#268bd2', variable: '#657b83', number: '#d33682', type: '#b58900', operator: '#859900' }
       ),
       'plum-dark': () => buildThemeExt(
-        { bg: '#15121A', fg: '#E8E2D5', sel: '#4A3A5C', cursor: '#D4AE8A', gutter: '#1C1825', gutterFg: '#6A6080', line: '#241E2E' },
-        { keyword: '#C79BBF', string: '#8EA88A', comment: '#6A6080', function: '#D4C697', variable: '#E8E2D5', number: '#C9956A', type: '#C79B78', operator: '#A8A09C' }
+        { bg: '#282c34', fg: '#abb2bf', sel: '#3e4451', cursor: '#61afef', gutter: '#282c34', gutterFg: '#5c6370', line: '#abb2bf14' },
+        { keyword: '#c678dd', string: '#98c379', comment: '#5c6370', function: '#61afef', variable: '#abb2bf', number: '#d19a66', type: '#e5c07b', operator: '#56b6c2' }
       ),
       'plum-light': () => buildThemeExt(
         { bg: '#F5EFE2', fg: '#2A2018', sel: '#C8B890', cursor: '#4A2640', gutter: '#EDE5D2', gutterFg: '#B0A48A', line: '#E2D8C1' },
@@ -109,43 +102,56 @@
       '.cm-activeLineGutter': { backgroundColor: t.line },
       '.cm-activeLine': { backgroundColor: t.line },
     }, { dark: t.bg < '#808080' });
+    // Syntax colors resolve through CSS vars so a custom theme can override
+    // them live; the curated per-theme color is the fallback, so built-ins
+    // (which don't change these vars) look exactly as before.
+    const c = {
+      keyword: `var(--syntax-keyword, ${s.keyword})`,
+      string: `var(--syntax-string, ${s.string})`,
+      comment: `var(--syntax-comment, ${s.comment})`,
+      function: `var(--syntax-function, ${s.function})`,
+      variable: `var(--syntax-variable, ${s.variable})`,
+      number: `var(--syntax-number, ${s.number})`,
+      type: `var(--syntax-type, ${s.type})`,
+      operator: `var(--syntax-operator, ${s.operator})`,
+    };
     const highlight = syntaxHighlighting(HighlightStyle.define([
-      { tag: tags.keyword, color: s.keyword },
-      { tag: tags.controlKeyword, color: s.keyword },
-      { tag: tags.string, color: s.string },
-      { tag: tags.comment, color: s.comment },
-      { tag: tags.lineComment, color: s.comment },
-      { tag: tags.blockComment, color: s.comment },
-      { tag: tags.function(tags.variableName), color: s.function },
-      { tag: tags.definition(tags.variableName), color: s.function },
-      { tag: tags.variableName, color: s.variable },
-      { tag: tags.number, color: s.number },
-      { tag: tags.integer, color: s.number },
-      { tag: tags.float, color: s.number },
-      { tag: tags.typeName, color: s.type },
-      { tag: tags.className, color: s.type },
-      { tag: tags.operator, color: s.operator },
-      { tag: tags.punctuation, color: s.variable },
-      { tag: tags.propertyName, color: s.function },
-      { tag: tags.bool, color: s.number },
-      { tag: tags.null, color: s.number },
-      { tag: tags.atom, color: s.number },
+      { tag: tags.keyword, color: c.keyword },
+      { tag: tags.controlKeyword, color: c.keyword },
+      { tag: tags.string, color: c.string },
+      { tag: tags.comment, color: c.comment },
+      { tag: tags.lineComment, color: c.comment },
+      { tag: tags.blockComment, color: c.comment },
+      { tag: tags.function(tags.variableName), color: c.function },
+      { tag: tags.definition(tags.variableName), color: c.function },
+      { tag: tags.variableName, color: c.variable },
+      { tag: tags.number, color: c.number },
+      { tag: tags.integer, color: c.number },
+      { tag: tags.float, color: c.number },
+      { tag: tags.typeName, color: c.type },
+      { tag: tags.className, color: c.type },
+      { tag: tags.operator, color: c.operator },
+      { tag: tags.punctuation, color: c.variable },
+      { tag: tags.propertyName, color: c.function },
+      { tag: tags.bool, color: c.number },
+      { tag: tags.null, color: c.number },
+      { tag: tags.atom, color: c.number },
       // Markdown / prose tags
-      { tag: tags.heading, color: s.keyword, fontWeight: 'bold' },
-      { tag: tags.heading1, color: s.keyword, fontWeight: 'bold' },
-      { tag: tags.heading2, color: s.keyword, fontWeight: 'bold' },
-      { tag: tags.heading3, color: s.keyword, fontWeight: 'bold' },
-      { tag: tags.emphasis, fontStyle: 'italic', color: s.string },
-      { tag: tags.strong, fontWeight: 'bold', color: s.function },
-      { tag: tags.link, color: s.type, textDecoration: 'underline' },
-      { tag: tags.url, color: s.type },
-      { tag: tags.monospace, color: s.number },
-      { tag: tags.strikethrough, textDecoration: 'line-through', color: s.comment },
-      { tag: tags.quote, color: s.string, fontStyle: 'italic' },
-      { tag: tags.meta, color: s.comment },
-      { tag: tags.contentSeparator, color: s.comment },
-      { tag: tags.processingInstruction, color: s.keyword },
-      { tag: tags.labelName, color: s.function },
+      { tag: tags.heading, color: c.keyword, fontWeight: 'bold' },
+      { tag: tags.heading1, color: c.keyword, fontWeight: 'bold' },
+      { tag: tags.heading2, color: c.keyword, fontWeight: 'bold' },
+      { tag: tags.heading3, color: c.keyword, fontWeight: 'bold' },
+      { tag: tags.emphasis, fontStyle: 'italic', color: c.string },
+      { tag: tags.strong, fontWeight: 'bold', color: c.function },
+      { tag: tags.link, color: c.type, textDecoration: 'underline' },
+      { tag: tags.url, color: c.type },
+      { tag: tags.monospace, color: c.number },
+      { tag: tags.strikethrough, textDecoration: 'line-through', color: c.comment },
+      { tag: tags.quote, color: c.string, fontStyle: 'italic' },
+      { tag: tags.meta, color: c.comment },
+      { tag: tags.contentSeparator, color: c.comment },
+      { tag: tags.processingInstruction, color: c.keyword },
+      { tag: tags.labelName, color: c.function },
     ]));
     return [theme, highlight];
   }
@@ -154,7 +160,8 @@
   import { search, searchKeymap, highlightSelectionMatches, openSearchPanel, SearchQuery, getSearchQuery, setSearchQuery, findNext, findPrevious, replaceNext, replaceAll, closeSearchPanel, SearchCursor, selectNextOccurrence } from '@codemirror/search';
   import { marked } from 'marked';
   import DOMPurify from 'dompurify';
-  import { updateFileContent, markFileSaved, autosaveEnabled, autosaveDelay, editorFontSize, editorTabSize, editorWordWrap, editorLineNumbers, editorShowErrorLens, editorVimMode, editorTheme, projectRoot, openFiles, registerFileRenameCallback, triggerSearchInFile, openPreviewSignal, activeFilePath } from '../../modules';
+  import { updateFileContent, markFileSaved, autosaveEnabled, autosaveDelay, editorFontSize, editorTabSize, editorWordWrap, editorLineNumbers, editorShowErrorLens, editorVimMode, editorTheme, projectRoot, openFiles, registerFileRenameCallback, triggerSearchInFile, openPreviewSignal, activeFilePath, editorGotoTarget, editorCursor, showChat, askLeoSignal } from '../../modules';
+  import { Sparkles } from 'lucide-svelte';
   import { vim } from '@replit/codemirror-vim';
   import { startInlineEdit, cancelInlineEdit, type InlineEditRequest } from '../../modules/ai/inlineEdit';
   import InlineEditPopover from './InlineEditPopover.svelte';
@@ -224,6 +231,21 @@
   const gitGutterComp = new Compartment();
   let editorContainer: HTMLDivElement;
   let view: EditorView | null = null;
+  let unsubGotoTarget: (() => void) | null = null;
+
+  function applyGotoTarget(attempt = 0) {
+    const t = get(editorGotoTarget);
+    if (!t) return;
+    if (view && currentFilePath === t.path) {
+      const lineNo = Math.max(1, Math.min(t.line, view.state.doc.lines));
+      const line = view.state.doc.line(lineNo);
+      view.dispatch({ selection: { anchor: line.from }, scrollIntoView: true });
+      view.focus();
+      editorGotoTarget.set(null);
+      return;
+    }
+    if (attempt < 30) requestAnimationFrame(() => applyGotoTarget(attempt + 1));
+  }
   let autosaveTimer: ReturnType<typeof setTimeout> | null = null;
   let gitGutterTimer: ReturnType<typeof setTimeout> | null = null;
   let saving = $state(false);
@@ -261,6 +283,14 @@
   let inlineEditLeft = $state(0);
   let inlineEditWidth = $state(320);
   let inlineEditSelection: { from: number; to: number; startLine: number; endLine: number; text: string } | null = null;
+
+  // ── "Ask Leo" selection button ──
+  // Appears ~0.5s after the user finishes a mouse selection, near the
+  // selection end; clicking it sends the snippet to the chat composer.
+  let askLeoVisible = $state(false);
+  let askLeoTop = $state(0);
+  let askLeoLeft = $state(0);
+  let askLeoTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Compartments for dynamic reconfiguration
   const fontSizeComp = new Compartment();
@@ -991,9 +1021,14 @@
 
   // ── Inline Edit (Cmd+K) ──
 
-  function openInlineEdit(v: EditorView) {
+  /**
+   * Open the inline-edit popover for the current selection. Returns true if it
+   * opened (so the Cmd+K keybinding consumes the event), or false when there's
+   * no selection — letting Cmd+K fall through to the command palette instead.
+   */
+  function openInlineEdit(v: EditorView): boolean {
     const sel = v.state.selection.main;
-    if (sel.empty) return; // Require a selection
+    if (sel.empty) return false; // Require a selection
 
     const startLine = v.state.doc.lineAt(sel.from).number;
     const endLine = v.state.doc.lineAt(sel.to).number;
@@ -1001,7 +1036,7 @@
 
     // Position the popover above the selection start
     const coords = v.coordsAtPos(sel.from);
-    if (!coords) return;
+    if (!coords) return false;
     const editorRect = editorContainer.getBoundingClientRect();
 
     inlineEditSelection = { from: sel.from, to: sel.to, startLine, endLine, text };
@@ -1009,12 +1044,51 @@
     inlineEditLeft = coords.left - editorRect.left;
     inlineEditWidth = Math.min(500, editorRect.width - 40);
     inlineEditVisible = true;
+    return true;
   }
 
   function closeInlineEdit() {
     inlineEditVisible = false;
     inlineEditSelection = null;
     cancelInlineEdit();
+  }
+
+  /** Hide the Ask-Leo button and cancel any pending show timer. */
+  function hideAskLeo() {
+    if (askLeoTimer) { clearTimeout(askLeoTimer); askLeoTimer = null; }
+    if (askLeoVisible) askLeoVisible = false;
+  }
+
+  /** Called on mouseup in the editor — show the Ask-Leo button ~0.5s later if
+   *  a non-empty selection remains. */
+  function scheduleAskLeo() {
+    if (askLeoTimer) clearTimeout(askLeoTimer);
+    askLeoVisible = false;
+    askLeoTimer = setTimeout(() => {
+      askLeoTimer = null;
+      if (!view) return;
+      const sel = view.state.selection.main;
+      if (sel.empty) return;
+      const coords = view.coordsAtPos(sel.head);
+      if (!coords || !editorContainer) return;
+      const rect = editorContainer.getBoundingClientRect();
+      askLeoTop = Math.max(4, coords.top - rect.top - 34);
+      askLeoLeft = Math.max(4, Math.min(coords.left - rect.left, rect.width - 130));
+      askLeoVisible = true;
+    }, 500);
+  }
+
+  /** Send the current selection to the chat composer and reveal the chat. */
+  function askLeoFromSelection() {
+    if (!view) { hideAskLeo(); return; }
+    const sel = view.state.selection.main;
+    const text = view.state.sliceDoc(sel.from, sel.to);
+    if (!text.trim()) { hideAskLeo(); return; }
+    const startLine = view.state.doc.lineAt(sel.from).number;
+    const endLine = view.state.doc.lineAt(sel.to).number;
+    askLeoSignal.set({ text, file: filePath, startLine, endLine });
+    showChat.set(true);
+    hideAskLeo();
   }
 
   async function handleInlineEditSubmit(instruction: string) {
@@ -1087,6 +1161,7 @@
         wordWrapComp.of(get(editorWordWrap) ? EditorView.lineWrapping : []),
         gitGutterComp.of([]),
         scrollbarAnnotations(),
+        colorSwatches(),
         errorLensComp.of(hasErrorLens(path) && get(editorShowErrorLens) ? buildErrorLensPlugin() : []),
         vimComp.of(get(editorVimMode) ? vim() : []),
         keymap.of([
@@ -1097,8 +1172,9 @@
           ...foldKeymap,
           indentWithTab,
           { key: 'Mod-s', run: () => { saveFile(path); return true; } },
-          // Inline edit (Cmd+K)
-          { key: 'Mod-k', run: (v) => { openInlineEdit(v); return true; } },
+          // Inline edit (Cmd+K). Returns false when there's no selection so the
+          // event falls through to the command palette (App.svelte).
+          { key: 'Mod-k', run: (v) => openInlineEdit(v) },
           // Common IDE shortcuts (VSCode/Zed/Xcode conventions)
           { key: 'Mod-/', run: toggleComment },
           { key: 'Mod-Shift-k', run: deleteLine },
@@ -1193,6 +1269,11 @@
         aiDiffExtension(),
         ghostTextExtension(),
         EditorView.updateListener.of((update) => {
+          if (update.selectionSet || update.docChanged) {
+            const head = update.state.selection.main.head;
+            const ln = update.state.doc.lineAt(head);
+            editorCursor.set({ line: ln.number, col: head - ln.from + 1 });
+          }
           if (update.docChanged) {
             if (ignoreNextDocChange) {
               ignoreNextDocChange = false;
@@ -1388,7 +1469,14 @@
 
   onMount(() => {
     window.addEventListener('keydown', handleGlobalKeydown);
+    // "Ask Leo" selection button: show shortly after a mouse selection ends,
+    // hide on a new click, scroll, or when focus leaves the editor.
+    editorContainer.addEventListener('mouseup', scheduleAskLeo);
+    editorContainer.addEventListener('mousedown', hideAskLeo);
+    editorContainer.addEventListener('wheel', hideAskLeo, { passive: true });
+    editorContainer.addEventListener('focusout', hideAskLeo);
     unbindDiffResolve = bindAiDiffResolve(editorContainer, handleDiffResolve);
+    unsubGotoTarget = editorGotoTarget.subscribe((t) => { if (t) applyGotoTarget(); });
 
     // Register rename callback to update cache keys
     unregisterRenameCallback = registerFileRenameCallback((oldPath, newPath) => {
@@ -1499,7 +1587,13 @@
   onDestroy(() => {
     unsubPendingEdits();
     unbindDiffResolve?.();
+    unsubGotoTarget?.();
     window.removeEventListener('keydown', handleGlobalKeydown);
+    if (askLeoTimer) clearTimeout(askLeoTimer);
+    editorContainer?.removeEventListener('mouseup', scheduleAskLeo);
+    editorContainer?.removeEventListener('mousedown', hideAskLeo);
+    editorContainer?.removeEventListener('wheel', hideAskLeo);
+    editorContainer?.removeEventListener('focusout', hideAskLeo);
     if (unregisterRenameCallback) unregisterRenameCallback();
     stopWatching();
     if (previewTimer) clearTimeout(previewTimer);
@@ -1647,6 +1741,19 @@
         onSubmit={handleInlineEditSubmit}
         onCancel={closeInlineEdit}
       />
+    {/if}
+    {#if askLeoVisible}
+      <button
+        class="ask-leo-btn"
+        style="top: {askLeoTop}px; left: {askLeoLeft}px;"
+        onmousedown={(e) => e.preventDefault()}
+        onclick={askLeoFromSelection}
+        title="Ask Leo about the selection"
+      >
+        <Sparkles size={12} />
+        <span>Ask Leo</span>
+        <kbd>⌘L</kbd>
+      </button>
     {/if}
     {#if isMarkdown && !showPreview}
       <button class="md-open-preview" onclick={() => showPreview = true} title="Open preview">
@@ -1801,6 +1908,42 @@
     overflow: hidden;
     position: relative;
     height: 100%;
+  }
+
+  .ask-leo-btn {
+    position: absolute;
+    z-index: 20;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    border-radius: 7px;
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    font-size: 11.5px;
+    font-weight: 500;
+    cursor: pointer;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.32);
+    white-space: nowrap;
+    animation: askLeoIn 0.12s ease-out;
+  }
+  .ask-leo-btn:hover {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, var(--bg-surface));
+  }
+  .ask-leo-btn :global(svg) { color: var(--accent); flex-shrink: 0; }
+  .ask-leo-btn kbd {
+    font-family: inherit;
+    font-size: 9.5px;
+    padding: 1px 4px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--text-primary) 12%, transparent);
+    color: var(--text-secondary);
+  }
+  @keyframes askLeoIn {
+    from { opacity: 0; transform: translateY(4px) scale(0.96); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
   }
 
   .md-divider {

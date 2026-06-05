@@ -75,3 +75,43 @@ export const WCAG_AA_NORMAL_TEXT = 4.5;
 export const WCAG_AA_LARGE_TEXT = 3.0;
 /** WCAG AA threshold for non-text UI components and graphical objects (≥3:1). */
 export const WCAG_AA_NON_TEXT = 3.0;
+
+/** Format an [r, g, b] triple (0..255, rounded + clamped) as `#rrggbb`. */
+export function toHexColor([r, g, b]: [number, number, number]): string {
+  const ch = (n: number) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, '0');
+  return `#${ch(r)}${ch(g)}${ch(b)}`;
+}
+
+/**
+ * Nudge a foreground color toward white or black just enough to reach `target`
+ * contrast against `bg`. If it already passes, the input is returned unchanged.
+ * Blends toward whichever endpoint raises contrast (white on dark bgs, black on
+ * light bgs) via binary search, so the original hue is preserved as much as
+ * possible. Returns the best achievable color if `target` is unreachable.
+ */
+export function adjustColorForContrast(
+  fg: [number, number, number],
+  bg: [number, number, number],
+  target: number,
+): [number, number, number] {
+  if (contrastRatio(fg, bg) >= target) return fg;
+  const white: [number, number, number] = [255, 255, 255];
+  const black: [number, number, number] = [0, 0, 0];
+  // Blend toward whichever endpoint yields more contrast against bg.
+  const endpoint = contrastRatio(white, bg) >= contrastRatio(black, bg) ? white : black;
+  // Best effort if the target is physically unreachable (e.g. mid-gray bg).
+  if (contrastRatio(endpoint, bg) < target) return endpoint;
+  // Integer-rounded blend at fraction t; the search evaluates on the rounded
+  // color so the returned value provably meets the target after rounding.
+  const mix = (t: number): [number, number, number] => [
+    Math.round(fg[0] + (endpoint[0] - fg[0]) * t),
+    Math.round(fg[1] + (endpoint[1] - fg[1]) * t),
+    Math.round(fg[2] + (endpoint[2] - fg[2]) * t),
+  ];
+  let lo = 0, hi = 1;
+  for (let i = 0; i < 24; i++) {
+    const mid = (lo + hi) / 2;
+    if (contrastRatio(mix(mid), bg) >= target) hi = mid; else lo = mid;
+  }
+  return mix(hi);
+}
