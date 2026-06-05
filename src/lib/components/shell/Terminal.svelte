@@ -28,6 +28,10 @@
     quotePathForShell,
     RendererPool, terminalRendererPoolEnabled,
     siblingLeaf,
+    computeSplitLayout,
+    setSplitRatio,
+    type SplitNode,
+    type SplitHandle,
     planPaneFocus,
     setActivePaneId,
     type PaneFocusReason,
@@ -58,12 +62,6 @@
     oscDispose?: () => void;
     agentDispose?: () => void;
   }
-
-  type Rect = { top: number; left: number; width: number; height: number };
-
-  type SplitNode =
-    | { type: 'leaf'; paneId: number }
-    | { type: 'split'; direction: 'horizontal' | 'vertical'; children: [SplitNode, SplitNode] };
 
   // ── State ────────────────────────────────────────────────────────
 
@@ -137,9 +135,11 @@
     currentTabId == null ? null : (activePaneByTab[currentTabId] ?? null)
   );
 
-  /** Rect layout for the ACTIVE tab's panes (the only ones that matter for
-   *  layout — other tabs are CSS-hidden so their xterm stays alive). */
-  const paneRects = $derived(computePaneRects(currentSplitTree));
+  /** Rect layout + divider handles for the ACTIVE tab's panes (the only ones
+   *  that matter for layout — other tabs are CSS-hidden so their xterm stays
+   *  alive). */
+  const paneLayout = $derived(computeSplitLayout(currentSplitTree));
+  const paneRects = $derived(paneLayout.rects);
 
   // ── Split tree helpers (pure functions) ──────────────────────────
 
@@ -152,8 +152,7 @@
   function replaceLeaf(node: SplitNode, targetId: number, replacement: SplitNode): SplitNode {
     if (node.type === 'leaf') return node.paneId === targetId ? replacement : node;
     return {
-      type: 'split',
-      direction: node.direction,
+      ...node,
       children: [
         replaceLeaf(node.children[0], targetId, replacement),
         replaceLeaf(node.children[1], targetId, replacement),
@@ -169,28 +168,61 @@
     if (!left && !right) return null;
     if (!left) return right;
     if (!right) return left;
-    return { type: 'split', direction: node.direction, children: [left, right] };
+    return { ...node, children: [left, right] };
   }
 
-  function computePaneRects(tree: SplitNode | null): Record<number, Rect> {
-    const rects: Record<number, Rect> = {};
-    function walk(node: SplitNode, top: number, left: number, width: number, height: number) {
-      if (node.type === 'leaf') {
-        rects[node.paneId] = { top, left, width, height };
-        return;
+  /** Monotonic id for split nodes so divider drags can target a split. */
+  let splitSeq = 0;
+  function nextSplitId(): number {
+    return ++splitSeq;
+  }
+
+  // ── Divider drag-to-resize ─────────────────────────
+  // The split's `ratio` is updated live as the user drags the divider; panes
+  // re-fit (rows/cols) on a rAF during the drag and once more on release.
+  let resizeHandleId = $state<number | null>(null);
+  let resizeRaf: number | null = null;
+
+  function startResize(e: PointerEvent, h: SplitHandle) {
+    if (currentTabId == null) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const tabId = currentTabId;
+    resizeHandleId = h.id;
+    const handleEl = e.currentTarget as HTMLElement;
+    try { handleEl.setPointerCapture(e.pointerId); } catch { /* unsupported */ }
+
+    const onMove = (ev: PointerEvent) => {
+      const root = terminalRoot?.getBoundingClientRect();
+      if (!root || root.width < 1 || root.height < 1) return;
+      const xPct = ((ev.clientX - root.left) / root.width) * 100;
+      const yPct = ((ev.clientY - root.top) / root.height) * 100;
+      // Position within this split's own region → ratio for its first child.
+      const ratio = h.direction === 'horizontal'
+        ? (xPct - h.left) / h.width
+        : (yPct - h.top) / h.height;
+      const tree = splitTrees[tabId];
+      if (!tree) return;
+      setSplitTree(tabId, setSplitRatio(tree, h.id, ratio));
+      if (resizeRaf == null) {
+        resizeRaf = requestAnimationFrame(() => {
+          resizeRaf = null;
+          for (const p of panes.filter(p => p.tabId === tabId)) fitPane(p);
+        });
       }
-      if (node.direction === 'horizontal') {
-        const w = width / 2;
-        walk(node.children[0], top, left, w, height);
-        walk(node.children[1], top, left + w, w, height);
-      } else {
-        const h = height / 2;
-        walk(node.children[0], top, left, width, h);
-        walk(node.children[1], top + h, left, width, h);
-      }
-    }
-    if (tree) walk(tree, 0, 0, 100, 100);
-    return rects;
+    };
+
+    const onUp = (ev: PointerEvent) => {
+      resizeHandleId = null;
+      try { handleEl.releasePointerCapture(ev.pointerId); } catch { /* ignore */ }
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      if (resizeRaf != null) { cancelAnimationFrame(resizeRaf); resizeRaf = null; }
+      for (const p of panes.filter(p => p.tabId === tabId)) fitPane(p);
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
   }
 
   // ── Per-tab state mutators ───────────────────────────────────────
@@ -452,6 +484,7 @@
     const xterm = new XTerm({
       cursorBlink: true,
       fontSize: effectiveFontSize(get(terminalFontSize), get(uiZoom)),
+      fontWeight: 500,
       fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--font-terminal').trim()
         || "ui-monospace, 'SF Mono', Menlo, Monaco, Consolas, monospace",
       theme: buildXtermTheme(),
@@ -567,6 +600,8 @@
     if (target.splitFrom && currentTree && findLeaf(currentTree, target.splitFrom) && target.direction) {
       setSplitTree(tabId, replaceLeaf(currentTree, target.splitFrom, {
         type: 'split',
+        id: nextSplitId(),
+        ratio: 0.5,
         direction: target.direction,
         children: [
           { type: 'leaf', paneId: target.splitFrom },
@@ -1064,7 +1099,7 @@
     {#each $terminalTabs as tab (tab.id)}
       {@const tabPanes = panes.filter(p => p.tabId === tab.id)}
       {@const isActive = tab.id === currentTabId}
-      {@const rectsForTab = isActive ? paneRects : computePaneRects(splitTrees[tab.id] ?? null)}
+      {@const rectsForTab = isActive ? paneRects : computeSplitLayout(splitTrees[tab.id] ?? null).rects}
       <div class="tab-layer" class:active={isActive}>
         {#each tabPanes as pane (pane.id)}
           {@const rect = rectsForTab[pane.id]}
@@ -1102,6 +1137,21 @@
             </div>
           {/if}
         {/each}
+        {#if isActive}
+          {#each paneLayout.handles as h (h.id)}
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div
+              class="pane-resizer {h.direction}"
+              class:dragging={resizeHandleId === h.id}
+              style={h.direction === 'horizontal'
+                ? `left:${h.pos}%;top:${h.top}%;height:${h.height}%;`
+                : `top:${h.pos}%;left:${h.left}%;width:${h.width}%;`}
+              role="separator"
+              aria-orientation={h.direction === 'horizontal' ? 'vertical' : 'horizontal'}
+              onpointerdown={(e) => startResize(e, h)}
+            ></div>
+          {/each}
+        {/if}
       </div>
     {/each}
   </div>
@@ -1234,6 +1284,43 @@
     padding: 4px;
     overflow: hidden;
   }
+
+  /* Draggable divider between split panes. Positioned on
+     the split boundary; a thin visible line with a wider invisible hit area. */
+  .pane-resizer {
+    position: absolute;
+    z-index: 15;
+    background: transparent;
+    touch-action: none;
+  }
+  .pane-resizer.horizontal {
+    width: 8px;
+    transform: translateX(-4px);
+    cursor: col-resize;
+  }
+  .pane-resizer.vertical {
+    height: 8px;
+    transform: translateY(-4px);
+    cursor: row-resize;
+  }
+  /* Center hairline that highlights on hover/drag. */
+  .pane-resizer::before {
+    content: '';
+    position: absolute;
+    background: var(--accent);
+    opacity: 0;
+    transition: opacity 0.12s ease;
+  }
+  .pane-resizer.horizontal::before {
+    top: 0; bottom: 0; left: 50%;
+    width: 2px; transform: translateX(-1px);
+  }
+  .pane-resizer.vertical::before {
+    left: 0; right: 0; top: 50%;
+    height: 2px; transform: translateY(-1px);
+  }
+  .pane-resizer:hover::before,
+  .pane-resizer.dragging::before { opacity: 0.6; }
 
   .pane-body :global(.xterm),
   .pane-body :global(.xterm-viewport),

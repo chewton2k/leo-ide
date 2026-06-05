@@ -1804,7 +1804,7 @@
     width: 100%;
     text-align: left;
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 700;
     color: var(--text-secondary);
     border-radius: 3px;
     margin: 0 3px;
@@ -1876,7 +1876,7 @@
   }
 
   .dir-name {
-    font-weight: 600;
+    font-weight: 700;
     color: var(--text-primary);
   }
 
