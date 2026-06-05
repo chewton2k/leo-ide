@@ -44,6 +44,12 @@ const DEFAULT_PERMISSIONS: Record<ToolName, PermissionLevel> = {
   run_command: 'ask',
   search_files: 'allow',
   grep: 'allow',
+  glob_files: 'allow',
+  run_background: 'ask',
+  read_background: 'allow',
+  kill_background: 'allow',
+  todo: 'allow',
+  run_subagent: 'ask',
   list_dir: 'allow',
 };
 
@@ -81,7 +87,7 @@ export function checkPermission(
   autoApprove: boolean,
 ): PermissionLevel {
   // Dangerous command check takes priority over everything
-  if (tool === 'run_command' && args.command) {
+  if ((tool === 'run_command' || tool === 'run_background') && args.command) {
     if (isDangerousCommand(args.command)) return 'deny';
   }
 
@@ -90,7 +96,7 @@ export function checkPermission(
   // Auto-approve mode: allowlisted commands run freely, dangerous still blocked
   if (autoApprove && base === 'ask') {
     // Even in auto-approve, only allowlisted commands run without any check
-    if (tool === 'run_command' && args.command && !isAllowlistedCommand(args.command)) {
+    if ((tool === 'run_command' || tool === 'run_background') && args.command && !isAllowlistedCommand(args.command)) {
       return 'ask'; // non-allowlisted commands still prompt in auto-approve
     }
     return 'allow';
@@ -119,7 +125,7 @@ export function isAllowlistedCommand(command: string): boolean {
  * Get a human-readable description of why a tool call was blocked.
  */
 export function getBlockReason(tool: ToolName, args: Record<string, string>): string {
-  if (tool === 'run_command' && args.command && isDangerousCommand(args.command)) {
+  if ((tool === 'run_command' || tool === 'run_background') && args.command && isDangerousCommand(args.command)) {
     return `Dangerous command blocked: "${args.command}"`;
   }
   return `Tool "${tool}" requires approval.`;

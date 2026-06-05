@@ -11,9 +11,11 @@ import { listen } from '@tauri-apps/api/event';
 import { chatMessages, aiProvider, aiModel, isStreaming, type ChatMessage, scheduleSaveConversation } from './ai';
 import { projectRoot } from '../git/git';
 import { buildProjectContext } from './contextBuilder';
-import { TOOL_SCHEMAS, dispatchTool, parseToolArgs, type ToolCall, type ToolResult } from './tools';
+import { dispatchTool, parseToolArgs, type ToolCall, type ToolResult } from './tools';
+import { agentToolSchemas, agentSystemAppendix } from './agents';
 import { checkPermission, getBlockReason, type PermissionLevel } from './toolPermissions';
 import { addEdits } from './pendingEdits';
+import { notify } from '../notify/notify';
 import { recordAiChange } from './aiHistory';
 import { currentPlan, createPlan, approvePlan, updateStepStatus, parsePlanSteps, PLAN_SYSTEM_PROMPT } from './agentPlan';
 import { createCheckpoint } from './checkpoints';
@@ -181,6 +183,7 @@ export async function runAgent(userRequest: string): Promise<void> {
     }
   }
 
+  if (!cancelRequested) void notify('Agent finished', userRequest.slice(0, 80));
   agentRunning.set(false);
   agentStep.set(0);
   currentSessionId = null;
@@ -395,7 +398,7 @@ async function streamAgentTurn(
         model: get(aiModel),
         provider: get(aiProvider),
         session_id: sessionId,
-        tools: TOOL_SCHEMAS,
+        tools: agentToolSchemas(),
       },
     });
   } catch (e) {
@@ -428,5 +431,5 @@ Guidelines:
 - Preserve existing code style
 - Explain your reasoning briefly before acting
 - If unsure, read more context before editing
-${projectContext}`;
+${projectContext}${agentSystemAppendix()}`;
 }

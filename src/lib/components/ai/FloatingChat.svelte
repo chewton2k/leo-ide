@@ -5,18 +5,21 @@
   import {
     Send, Square, X, Minus, Maximize2, Paperclip, XCircle, Sparkles, History,
     FileText, Terminal as TerminalIcon, Search as SearchIcon, Pencil,
-    AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Plus, Play,
+    AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Plus, Play, Mic,
   } from 'lucide-svelte';
   import {
     chatMessages, isStreaming, aiProvider, aiModel,
     sendStreamingMessage, cancelStream, clearChat, attachedFiles,
+    askLeoSignal,
     type AiProvider,
     listConversations, loadConversation, saveConversationNow,
     conversationId,
     createParsedMessagesCache,
     createProseRenderer,
   } from '../../modules';
+  import { untrack } from 'svelte';
   import { showChat, activeFile } from '../../modules';
+  import { slashQuery, filterSlashCommands, isVoiceSupported } from '../../modules';
   import { runAgentWithPlan, agentRunning, stopAgent } from '../../modules/ai/agentLoop';
   import { currentPlan } from '../../modules/ai/agentPlan';
   import { restoreCheckpoint, checkpoints, refreshCheckpoints } from '../../modules/ai/checkpoints';
@@ -38,6 +41,21 @@
   let input = $state('');
   let inputEl = $state<HTMLTextAreaElement>(undefined!);
   let messagesEl = $state<HTMLDivElement>(undefined!);
+
+  // Prefill the composer from the editor's "Ask Leo" selection button, then
+  // reveal + focus the chat. One-shot: the signal is cleared after consuming.
+  $effect(() => {
+    const req = $askLeoSignal;
+    if (!req) return;
+    const loc = req.file
+      ? `${basename(req.file)}${req.startLine ? `:${req.startLine}-${req.endLine}` : ''}`
+      : 'the selection';
+    const snippet = '```\n' + req.text + '\n```';
+    const prev = untrack(() => input);
+    input = (prev ? prev.trimEnd() + '\n\n' : '') + `About ${loc}:\n${snippet}\n\n`;
+    askLeoSignal.set(null);
+    requestAnimationFrame(() => { autoSizeInput(); inputEl?.focus(); });
+  });
 
   // ── Expanded tool-call / tool-result panels ─────────────────────
   // Keyed by message-index + block-index. Reset on conversation change.
@@ -73,8 +91,8 @@
   // ── Drag / resize ───────────────────────────────────────────────
   let dragging = $state(false);
   let resizing = $state(false);
-  let dragStart = { x: 0, y: 0, winX: 0, winY: 0 };
-  let resizeStart = { x: 0, y: 0, w: 0, h: 0 };
+  let dragStart: { x: number; y: number; winX: number; winY: number; _pendingX?: number; _pendingY?: number } = { x: 0, y: 0, winX: 0, winY: 0 };
+  let resizeStart: { x: number; y: number; w: number; h: number; _pendingW?: number; _pendingH?: number } = { x: 0, y: 0, w: 0, h: 0 };
 
   let dragRafId: number | null = null;
 
@@ -156,12 +174,16 @@
       { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
       { id: 'claude-haiku-4-5',  label: 'Claude Haiku 4.5' },
     ],
+    local: [
+      { id: 'local-model', label: 'Local model' },
+    ],
   };
 
   const PROVIDER_LABEL: Record<AiProvider, string> = {
     openrouter: 'OpenRouter',
     openai: 'OpenAI',
     anthropic: 'Anthropic',
+    local: 'Local',
   };
 
   const currentModelLabel = $derived(
@@ -292,6 +314,44 @@
 
   function removeFile(path: string) {
     attachedFiles.update(files => files.filter(f => f.path !== path));
+  }
+
+  // ── Composer: slash commands + voice dictation ──
+  const slashMatches = $derived.by(() => {
+    const q = slashQuery(input);
+    return q === null ? [] : filterSlashCommands(q);
+  });
+  const voiceSupported = isVoiceSupported();
+  let recognizing = $state(false);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let recognition: any = null;
+
+  function runSlash(id: string) {
+    input = '';
+    autoSizeInput();
+    if (id === 'clear') clearChat();
+    else if (id === 'attach') attachCurrentFile();
+    else if (id === 'model') modelMenuOpen = true;
+    inputEl?.focus();
+  }
+
+  function toggleVoice() {
+    if (!voiceSupported) return;
+    if (recognizing) { recognition?.stop(); return; }
+    const SR = (window as unknown as Record<string, any>).SpeechRecognition
+      || (window as unknown as Record<string, any>).webkitSpeechRecognition;
+    recognition = new SR();
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.onresult = (e: any) => {
+      const text = Array.from(e.results).map((r: any) => r[0].transcript).join(' ');
+      input = input ? `${input} ${text}` : text;
+      autoSizeInput();
+    };
+    recognition.onend = () => { recognizing = false; };
+    recognition.onerror = () => { recognizing = false; };
+    recognizing = true;
+    recognition.start();
   }
 
   // ── Markdown rendering ──────────────────────────────────────────
@@ -541,6 +601,16 @@
 
       <!-- Composer -->
       <div class="composer">
+        {#if slashMatches.length > 0}
+          <div class="slash-menu">
+            {#each slashMatches as cmd (cmd.id)}
+              <button class="slash-item" onclick={() => runSlash(cmd.id)}>
+                <span class="slash-label">{cmd.label}</span>
+                <span class="slash-hint">{cmd.hint}</span>
+              </button>
+            {/each}
+          </div>
+        {/if}
         <div class="composer-input">
           <textarea
             bind:this={inputEl}
@@ -557,6 +627,11 @@
             <button class="icon-btn" onclick={attachCurrentFile} title="Attach current file" aria-label="Attach current file">
               <Paperclip size={12} />
             </button>
+            {#if voiceSupported}
+              <button class="icon-btn" class:active={recognizing} onclick={toggleVoice} title="Voice input" aria-label="Voice input">
+                <Mic size={12} />
+              </button>
+            {/if}
             <div class="model-picker" bind:this={modelMenuEl}>
               <button class="model-btn" onclick={() => modelMenuOpen = !modelMenuOpen} aria-haspopup="menu" aria-expanded={modelMenuOpen}>
                 <span class="model-provider">{PROVIDER_LABEL[selectedProvider]}</span>
@@ -1001,6 +1076,30 @@
     flex-shrink: 0;
     background: var(--bg-secondary);
   }
+  .slash-menu {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    margin-bottom: 4px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--bg-surface);
+  }
+  .slash-item {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 6px 10px;
+    text-align: left;
+    background: none;
+    color: var(--text-primary);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .slash-item:hover { background: var(--bg-tertiary); }
+  .slash-label { font-family: var(--font-mono); }
+  .slash-hint { color: var(--text-muted); font-size: 11px; }
   .composer-input {
     background: var(--bg-tertiary);
     border: 1px solid var(--border);

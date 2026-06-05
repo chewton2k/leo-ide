@@ -6,6 +6,7 @@ import { parseAiEdits, hasEdits } from './editParser';
 import { EDIT_SYSTEM_PROMPT } from './systemPrompts';
 import { buildProjectContext } from './contextBuilder';
 import { addEdits } from './pendingEdits';
+import { resetAgentSession } from './agentShell';
 import { activeFilePath, getFileContent } from '../explorer/files';
 import { projectRoot } from '../git/git';
 import { log } from '../logging';
@@ -20,6 +21,24 @@ export interface ChatMessage {
 export const chatMessages = writable<ChatMessage[]>([]);
 export const isStreaming = writable<boolean>(false);
 export const attachedFiles = writable<{ path: string; name: string }[]>([]);
+
+/** Attach a file (by absolute path) to the AI composer context. Deduplicates. */
+export function attachFile(path: string): void {
+  if (!path) return;
+  const name = path.split(/[\\/]/).pop() || path;
+  attachedFiles.update(files => (files.some(f => f.path === path) ? files : [...files, { path, name }]));
+}
+
+/** A selection the user wants to ask Leo about (from the editor's "Ask Leo"
+ *  button). Set by the editor, consumed once by the chat which prefills its
+ *  input with the snippet and focuses. */
+export interface AskLeoRequest {
+  text: string;
+  file?: string;
+  startLine?: number;
+  endLine?: number;
+}
+export const askLeoSignal = writable<AskLeoRequest | null>(null);
 
 export type AiProvider = 'openrouter' | 'openai' | 'anthropic' | 'local';
 
@@ -225,6 +244,7 @@ export async function cancelStream() {
 export function clearChat() {
   chatMessages.set([]);
   attachedFiles.set([]);
+  resetAgentSession();
   currentConversationId = generateSessionId();
   // Keep the exported store in sync with the internal id so consumers
   // (e.g. parsed-message memoization) can invalidate caches reactively.

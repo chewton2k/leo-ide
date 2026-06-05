@@ -9,6 +9,10 @@
  * The dispatch function is called when the model returns a tool_call.
  */
 import { invoke } from '@tauri-apps/api/core';
+import { get } from 'svelte/store';
+import { runInAgentSession, formatCommandResult } from './agentShell';
+import { aiProvider, aiModel } from './ai';
+import { getCustomAgent, parseTodoItems, setAgentTodos, formatTodos } from './agents';
 
 // ── Tool Schema Types (OpenAI format) ──
 
@@ -112,14 +116,102 @@ export const TOOL_SCHEMAS: ToolSchema[] = [
     type: 'function',
     function: {
       name: 'grep',
-      description: 'Search for a text pattern across project files. Returns matching lines with file paths.',
+      description: 'Search file contents for a regex pattern across the project (ripgrep-style, gitignore-aware). Returns matching lines with file paths and line numbers.',
       parameters: {
         type: 'object',
         properties: {
-          pattern: { type: 'string', description: 'Text or regex pattern to search for' },
-          path: { type: 'string', description: 'Optional subdirectory to limit search scope' },
+          pattern: { type: 'string', description: 'Regex pattern to search for' },
+          path: { type: 'string', description: 'Optional subdirectory (relative to project root) to limit search scope' },
+          glob: { type: 'string', description: 'Optional glob to filter files, e.g. "*.rs" or "src/**/*.ts"' },
+          case_insensitive: { type: 'string', description: 'Set to "true" for case-insensitive matching' },
         },
         required: ['pattern'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'glob_files',
+      description: 'Find files whose path matches a glob pattern (gitignore-aware), e.g. "**/*.test.ts".',
+      parameters: {
+        type: 'object',
+        properties: {
+          pattern: { type: 'string', description: 'Glob pattern to match against project-relative paths' },
+        },
+        required: ['pattern'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'run_background',
+      description: 'Start a long-running command (e.g. a dev server or watcher) as a background process. Returns a handle; use read_background to tail its output. Does NOT block.',
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string', description: 'The shell command to run in the background' },
+        },
+        required: ['command'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_background',
+      description: 'Read new output from a background process by handle. Pass the previous "next offset" as `since` to tail incrementally.',
+      parameters: {
+        type: 'object',
+        properties: {
+          handle: { type: 'string', description: 'Background process handle (number)' },
+          since: { type: 'string', description: 'Byte offset to read from (default 0)' },
+        },
+        required: ['handle'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'kill_background',
+      description: 'Terminate a background process by handle.',
+      parameters: {
+        type: 'object',
+        properties: {
+          handle: { type: 'string', description: 'Background process handle (number)' },
+        },
+        required: ['handle'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'todo',
+      description: 'Record or update your task list for a multi-step request. Pass the full list each time; lines beginning with [x] are completed, [ ] are pending.',
+      parameters: {
+        type: 'object',
+        properties: {
+          items: { type: 'string', description: 'Newline-separated tasks, e.g. "[x] read files\\n[ ] write tests".' },
+        },
+        required: ['items'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'run_subagent',
+      description: 'Delegate a focused sub-task to a configured custom agent and return its response. Use for specialized review or analysis.',
+      parameters: {
+        type: 'object',
+        properties: {
+          agent_id: { type: 'string', description: 'Id of the custom agent to consult.' },
+          task: { type: 'string', description: 'The task or question for the sub-agent.' },
+        },
+        required: ['agent_id', 'task'],
       },
     },
   },
@@ -141,9 +233,9 @@ export const TOOL_SCHEMAS: ToolSchema[] = [
 
 // ── Tool Names (for type safety) ──
 
-export type ToolName = 'read_file' | 'edit_file' | 'run_command' | 'search_files' | 'grep' | 'list_dir';
+export type ToolName = 'read_file' | 'edit_file' | 'run_command' | 'search_files' | 'grep' | 'glob_files' | 'run_background' | 'read_background' | 'kill_background' | 'todo' | 'run_subagent' | 'list_dir';
 
-export const ALL_TOOL_NAMES: ToolName[] = ['read_file', 'edit_file', 'run_command', 'search_files', 'grep', 'list_dir'];
+export const ALL_TOOL_NAMES: ToolName[] = ['read_file', 'edit_file', 'run_command', 'search_files', 'grep', 'glob_files', 'run_background', 'read_background', 'kill_background', 'todo', 'run_subagent', 'list_dir'];
 
 // ── Dispatch ──
 
@@ -235,27 +327,23 @@ async function executeTool(
     case 'run_command': {
       const command = args.command;
       if (!command) throw new Error('command is required');
-      // Use the run_sandboxed command if available, otherwise indicate blocked
       try {
-        const result = await invoke<{ stdout: string; stderr: string; exit_code: number }>(
-          'run_command_capture',
-          { command, cwd: ctx.projectRoot, timeoutMs: 30000 }
-        );
-        let output = '';
-        if (result.stdout) output += result.stdout;
-        if (result.stderr) output += (output ? '\n' : '') + result.stderr;
-        if (!output) output = `(no output, exit code: ${result.exit_code})`;
-        // Truncate
-        const MAX = 4000;
-        if (output.length > MAX) output = output.slice(0, MAX) + '\n... (truncated)';
-        return output;
+        const result = await runInAgentSession(command, ctx.projectRoot, 30000);
+        return formatCommandResult(result);
       } catch {
-        // Fallback: command capture not available yet
-        if (ctx.onCommandBlocked) {
-          ctx.onCommandBlocked(command);
-          return `Command "${command}" requires approval.`;
+        try {
+          const result = await invoke<{ stdout: string; stderr: string; exit_code: number }>(
+            'run_command_capture',
+            { command, cwd: ctx.projectRoot, timeoutMs: 30000 }
+          );
+          return formatCommandResult(result);
+        } catch {
+          if (ctx.onCommandBlocked) {
+            ctx.onCommandBlocked(command);
+            return `Command "${command}" requires approval.`;
+          }
+          return `Command execution not available. Command: ${command}`;
         }
-        return `Command execution not available. Command: ${command}`;
       }
     }
 
@@ -271,29 +359,78 @@ async function executeTool(
     case 'grep': {
       const pattern = args.pattern;
       if (!pattern) throw new Error('pattern is required');
-      const searchPath = args.path
-        ? resolvePath(args.path, ctx.projectRoot)
-        : ctx.projectRoot;
-      // Use list_all_files + read to simulate grep (until a dedicated backend command exists)
-      const files = await invoke<string[]>('list_all_files', { path: searchPath });
-      const results: string[] = [];
-      const MAX_FILES = 20;
-      const MAX_RESULTS = 30;
-      for (const file of files.slice(0, MAX_FILES)) {
-        if (results.length >= MAX_RESULTS) break;
-        try {
-          const fullPath = file.startsWith('/') ? file : `${ctx.projectRoot}/${file}`;
-          const content = await invoke<string>('read_file_content', { path: fullPath });
-          const lines = content.split('\n');
-          for (let i = 0; i < lines.length && results.length < MAX_RESULTS; i++) {
-            if (lines[i].includes(pattern)) {
-              const rel = file.startsWith(ctx.projectRoot) ? file.slice(ctx.projectRoot.length + 1) : file;
-              results.push(`${rel}:${i + 1}: ${lines[i].trim()}`);
-            }
-          }
-        } catch { /* skip unreadable files */ }
-      }
-      return results.length > 0 ? results.join('\n') : `No matches for "${pattern}".`;
+      const root = args.path ? resolvePath(args.path, ctx.projectRoot) : ctx.projectRoot;
+      const res = await invoke<{ hits: { rel: string; line: number; text: string }[]; truncated: boolean }>('fs_grep', {
+        pattern,
+        root,
+        glob: args.glob ? [args.glob] : null,
+        caseInsensitive: args.case_insensitive === 'true' ? true : null,
+        maxResults: 100,
+      });
+      if (res.hits.length === 0) return `No matches for "${pattern}".`;
+      const lines = res.hits.map(h => `${h.rel}:${h.line}: ${h.text.trim()}`);
+      if (res.truncated) lines.push('... (truncated)');
+      return lines.join('\n');
+    }
+
+    case 'glob_files': {
+      const pattern = args.pattern;
+      if (!pattern) throw new Error('pattern is required');
+      const res = await invoke<{ hits: { rel: string }[]; truncated: boolean }>('fs_glob', {
+        pattern,
+        root: ctx.projectRoot,
+        maxResults: 200,
+      });
+      if (res.hits.length === 0) return `No files match "${pattern}".`;
+      const out = res.hits.map(h => h.rel);
+      if (res.truncated) out.push('... (truncated)');
+      return out.join('\n');
+    }
+
+    case 'run_background': {
+      const command = args.command;
+      if (!command) throw new Error('command is required');
+      const handle = await invoke<number>('shell_bg_spawn', { command, cwd: ctx.projectRoot });
+      return `Started background process #${handle}: ${command}\nUse read_background with handle ${handle} to read its output.`;
+    }
+
+    case 'read_background': {
+      const handle = parseInt(args.handle, 10);
+      if (isNaN(handle)) throw new Error('handle must be a number');
+      const since = args.since ? parseInt(args.since, 10) : 0;
+      const res = await invoke<{ bytes: string; next_offset: number; exited: boolean; exit_code: number | null }>(
+        'shell_bg_logs', { handle, sinceOffset: since },
+      );
+      let out = res.bytes || '(no new output)';
+      const MAX = 4000;
+      if (out.length > MAX) out = out.slice(-MAX);
+      const status = res.exited ? `\n[exited${res.exit_code != null ? ` with code ${res.exit_code}` : ''}]` : '';
+      return `${out}${status}\n[next offset: ${res.next_offset}]`;
+    }
+
+    case 'kill_background': {
+      const handle = parseInt(args.handle, 10);
+      if (isNaN(handle)) throw new Error('handle must be a number');
+      await invoke('shell_bg_kill', { handle });
+      return `Killed background process #${handle}.`;
+    }
+
+    case 'todo': {
+      const items = parseTodoItems(args.items || '');
+      setAgentTodos(items);
+      return formatTodos(items);
+    }
+
+    case 'run_subagent': {
+      if (!args.agent_id) throw new Error('agent_id is required');
+      if (!args.task) throw new Error('task is required');
+      const agent = getCustomAgent(args.agent_id);
+      if (!agent) throw new Error(`No custom agent with id "${args.agent_id}".`);
+      const prompt = `${agent.systemPrompt}\n\nTask:\n${args.task}`;
+      const out = await invoke<string>('ai_chat', {
+        request: { prompt, provider: get(aiProvider), model: get(aiModel) },
+      });
+      return `[${agent.name}]\n${out}`;
     }
 
     case 'list_dir': {
