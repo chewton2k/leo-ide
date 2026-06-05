@@ -28,6 +28,14 @@
     "drag:default",
     "core:window:allow-close",
     "core:window:allow-destroy",
+    "updater:default",
+    "process:allow-restart",
+    "window-state:default",
+    "notification:default",
+    "store:default",
+    "autostart:allow-enable",
+    "autostart:allow-disable",
+    "autostart:allow-is-enabled",
     {
       "identifier": "fs:scope",
       "allow": [
