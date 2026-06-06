@@ -6,7 +6,11 @@ export default defineConfig({
   plugins: [svelte()],
   build: {
     target: 'es2022',
-    sourcemap: 'hidden',
+    // Source maps are not shipped: Tauri bundles the entire `dist/` into the
+    // .app, so emitting maps (even 'hidden') ships ~8.5 MB of debug data that
+    // users can never use. Re-enable temporarily if you need to debug a
+    // production build, but keep it false for releases.
+    sourcemap: false,
     minify: 'esbuild',
     cssMinify: true,
     reportCompressedSize: false,

@@ -1,7 +1,7 @@
 pub mod modules;
 
 use modules::{
-    ai, fs, git, graph, knowledge, log as app_log, menu, session, shell, symbols, window_mgr,
+    ai, fs, git, graph, knowledge, log as app_log, menu, session, shell, window_mgr,
 };
 use std::sync::Arc;
 use tauri::Manager;
@@ -148,9 +148,6 @@ pub fn run() {
             knowledge::knowledge_admin_load_conversation,
             knowledge::knowledge_admin_delete_conversation,
             knowledge::knowledge_admin_delete_conversations,
-            // Symbols
-            symbols::symbols_extract,
-            symbols::symbols_get_body,
             // Window management
             window_mgr::open_new_window,
             window_mgr::open_folder_in_new_window,

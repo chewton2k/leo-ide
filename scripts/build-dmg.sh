@@ -254,6 +254,32 @@ human_size() {
   [[ -e "$path" ]] && du -sh "$path" 2>/dev/null | awk '{print $1}' || echo "?"
 }
 
+# Remove orphaned SQLite knowledge stores left over from the pre-JSON
+# knowledge backend (migration: rusqlite/bundled SQLite → per-project JSON).
+# The current app reads `<hash>.json` in this directory and can no longer read
+# these `.db` files, so they are dead data. Only SQLite artifacts are touched;
+# the new `.json` stores and everything else are preserved.
+clean_legacy_sqlite() {
+  local kdir="$HOME/.leo-ide/knowledge"
+  [[ -d "$kdir" ]] || return 0
+
+  local removed=0
+  local freed_before freed_after
+  local f
+  # `.db` plus the sqlite sidecars (-journal / -wal / -shm). The `[[ -e ]]`
+  # guard handles the no-match case (globs stay literal without nullglob).
+  for f in "$kdir"/*.db "$kdir"/*.db-journal "$kdir"/*.db-wal "$kdir"/*.db-shm; do
+    [[ -e "$f" ]] || continue
+    if rm -f -- "$f"; then
+      removed=$((removed + 1))
+    fi
+  done
+
+  if (( removed > 0 )); then
+    log_info "Removed $removed legacy SQLite knowledge file(s) from $kdir"
+  fi
+}
+
 # ── Step 1: Cleanup ────────────────────────────────────────────────
 
 if [[ "$SKIP_CLEAN" == 1 ]]; then
@@ -271,6 +297,9 @@ else
 
   log_info "Clearing ephemeral caches for $NEW_IDENTIFIER"
   clean_identifier_caches "$NEW_IDENTIFIER"
+
+  log_info "Removing legacy SQLite knowledge stores (migrated to JSON)"
+  clean_legacy_sqlite
 
   for legacy_id in "${LEGACY_IDENTIFIERS[@]}"; do
     log_info "Scrubbing legacy data for $legacy_id"
