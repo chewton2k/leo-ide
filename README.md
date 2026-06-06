@@ -10,7 +10,6 @@ A lightweight (6.5MB) IDE that's written with a rust backend for speed and consi
 - [Run - Development](#run---development)
 - [Build - Production App](#build---production-app)
 - [Beta Testing](#beta-testing)
-- [Themes](#themes)
 - [Feedback](#feedback)
 
 ## How to get started: 
