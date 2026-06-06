@@ -1,6 +1,6 @@
 # leo-IDE
 
-A lightweight (~10MB) IDE that's written with a rust backend for speed and consistency. 
+A lightweight (6.5MB) IDE that's written with a rust backend for speed and consistency. 
 
 ---
 
@@ -43,7 +43,7 @@ For other platforms, see [rustup.rs](https://rustup.rs)
 
 #### Run - Development
 ```bash
-  npm run tauri:dev
+npm run tauri:dev
 ```
 Builds and launches a live development version of the app with hot-reloading.
 
@@ -59,7 +59,7 @@ Compiles and installs the app to your system's application folder.
 
 To test the latest in-progress features, switch to the beta branch after cloning:
 
-> **Warning:** Beta builds are unstable. Do not use them for important work.
+> **Warning:** Product is still in beta, builds are unstable.
 ---
 
 ### Feedback
