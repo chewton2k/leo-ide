@@ -88,9 +88,11 @@
         pdfData = bytes;
         fileSize = formatSize(bytes.length);
       } else if (type === 'video' || type === 'audio') {
+        // Stream via the asset protocol — do NOT read the whole file into
+        // memory. Previously we base64-loaded the entire media file just to
+        // display its size, which defeated streaming for large videos.
         assetUrl = convertFileSrc(path);
-        const base64 = await invoke<string>('read_file_binary', { path });
-        fileSize = formatSize(Math.floor(base64.length * 0.75));
+        fileSize = '';
       } else {
         const base64 = await invoke<string>('read_file_binary', { path });
         const mime = getMimeType(path);

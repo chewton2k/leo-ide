@@ -152,6 +152,12 @@ pub async fn shell_session_run(
     command: String,
     timeout_ms: u64,
 ) -> Result<SessionRunOutput, String> {
+    if crate::modules::shell::policy::is_catastrophic_command(&command) {
+        return Err(
+            "Refused by safety policy: command appears to perform irreversible destruction"
+                .to_string(),
+        );
+    }
     let session = state
         .sessions
         .lock()

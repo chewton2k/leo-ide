@@ -625,7 +625,10 @@ pub async fn knowledge_delete_conversation(
 /// Individual read errors yield an empty store (skipped from results), so a
 /// single corrupt file can't break listing.
 #[tauri::command]
-pub async fn knowledge_list_projects() -> Result<Vec<ProjectInfo>, String> {
+pub async fn knowledge_list_projects(
+    window: tauri::WebviewWindow,
+) -> Result<Vec<ProjectInfo>, String> {
+    require_settings_window(&window)?;
     let dir = knowledge_dir();
     if !dir.exists() {
         return Ok(Vec::new());
@@ -680,9 +683,11 @@ pub async fn knowledge_list_projects() -> Result<Vec<ProjectInfo>, String> {
 /// Delete an entire project's knowledge store.
 #[tauri::command]
 pub async fn knowledge_delete_project(
+    window: tauri::WebviewWindow,
     project_root: String,
     state: tauri::State<'_, Arc<KnowledgeState>>,
 ) -> Result<(), String> {
+    require_settings_window(&window)?;
     let hash = db_hash_of(&project_root);
     let path = db_path(&project_root);
 
@@ -697,9 +702,11 @@ pub async fn knowledge_delete_project(
 /// where the original project_root is unknown.
 #[tauri::command]
 pub async fn knowledge_delete_by_hash(
+    window: tauri::WebviewWindow,
     db_hash: String,
     state: tauri::State<'_, Arc<KnowledgeState>>,
 ) -> Result<(), String> {
+    require_settings_window(&window)?;
     // Validate hash format: exactly 16 hex chars.
     if !db_hash.chars().all(|c| c.is_ascii_hexdigit()) || db_hash.len() != 16 {
         return Err("Invalid db_hash: must be exactly 16 hex characters".to_string());
@@ -726,8 +733,10 @@ pub async fn knowledge_delete_by_hash(
 /// don't abort the operation.
 #[tauri::command]
 pub async fn knowledge_delete_all_projects(
+    window: tauri::WebviewWindow,
     _state: tauri::State<'_, Arc<KnowledgeState>>,
 ) -> Result<(), String> {
+    require_settings_window(&window)?;
     let dir = knowledge_dir();
     if !dir.exists() {
         return Ok(());
@@ -764,9 +773,19 @@ fn validate_admin_db_access(project_root: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// The dedicated settings window's label. Admin/global knowledge commands
+/// are restricted to this window so an ordinary project window (or a
+/// compromised webview in one) cannot enumerate or delete other projects'
+/// stores.
+pub(crate) const SETTINGS_WINDOW_LABEL: &str = "settings";
+
+pub(crate) fn is_settings_window_label(label: &str) -> bool {
+    label == SETTINGS_WINDOW_LABEL
+}
+
 /// Verify the calling window is the settings window.
 fn require_settings_window(window: &tauri::WebviewWindow) -> Result<(), String> {
-    if window.label() != "settings" {
+    if !is_settings_window_label(window.label()) {
         return Err(
             "Access denied: admin commands are only available from the settings window".to_string(),
         );
@@ -1023,4 +1042,31 @@ fn extract_exports(content: &str, lang: &str) -> String {
         }
     }
     exports.join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── G (LOW): settings-window gating for global/admin commands ──
+
+    #[test]
+    fn only_settings_label_is_authorized_for_admin() {
+        assert!(is_settings_window_label("settings"));
+        assert!(!is_settings_window_label("main"));
+        assert!(!is_settings_window_label("win-2"));
+        assert!(!is_settings_window_label("Settings")); // case-sensitive
+        assert!(!is_settings_window_label(""));
+    }
+
+    #[test]
+    fn db_hash_is_16_hex_chars() {
+        let h = db_hash_of("/Users/dev/project");
+        assert_eq!(h.len(), 16);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+        // Deterministic for the same root.
+        assert_eq!(h, db_hash_of("/Users/dev/project"));
+        // Different roots → different hashes.
+        assert_ne!(h, db_hash_of("/Users/dev/other"));
+    }
 }

@@ -74,6 +74,29 @@ pub fn set_project_root_for_label(
     Ok(canonical_str)
 }
 
+/// Directory names that hold credentials/secrets. Access is denied even
+/// when the path resolves inside the project root. This mirrors the Tauri
+/// `fs:scope` capability deny-list, which only governs the fs *plugin*
+/// commands — the app's own custom commands go through `validate_path`, so
+/// the deny-list must be enforced here too.
+pub(crate) const SENSITIVE_DIR_NAMES: [&str; 3] = [".ssh", ".aws", ".gnupg"];
+
+/// True when any path component is one of the sensitive directory names.
+/// Matching is exact per-component but case-insensitive, because macOS and
+/// Windows filesystems are case-insensitive (so `.SSH` resolves to `.ssh`).
+/// Substrings like `.sshconfig` or `my.aws.notes` are not flagged.
+pub(crate) fn has_sensitive_component(path: &Path) -> bool {
+    path.components().any(|c| {
+        matches!(
+            c,
+            std::path::Component::Normal(name)
+                if SENSITIVE_DIR_NAMES.iter().any(|b| {
+                    name.to_string_lossy().eq_ignore_ascii_case(b)
+                })
+        )
+    })
+}
+
 /// Validate that a path is within the calling window's project root.
 /// Returns the canonicalized path on success.
 pub fn validate_path(
@@ -86,7 +109,14 @@ pub fn validate_path(
         .get(window_label)
         .and_then(|opt| opt.as_ref())
         .ok_or_else(|| "No project is open".to_string())?;
+    resolve_validated_path(path, root)
+}
 
+/// Pure path-validation core, independent of Tauri state: canonicalize
+/// `path`, ensure it stays within `root`, and reject sensitive directories.
+/// Factored out of `validate_path` so it can be reused by async commands
+/// (which resolve `root` via `.read().await`) and unit-tested directly.
+pub(crate) fn resolve_validated_path(path: &str, root: &Path) -> Result<PathBuf, String> {
     let p = PathBuf::from(path);
     let canonical = if p.exists() {
         fs::canonicalize(&p).map_err(|e| format!("Invalid path: {}", e))?
@@ -124,7 +154,32 @@ pub fn validate_path(
         return Err("Access denied: path is outside the project directory".to_string());
     }
 
+    if has_sensitive_component(&canonical) {
+        return Err(
+            "Access denied: path is within a protected sensitive directory (.ssh/.aws/.gnupg)"
+                .to_string(),
+        );
+    }
+
     Ok(canonical)
+}
+
+/// Async sibling of [`validate_path`]: resolves the project root via the
+/// async lock (safe inside `#[tauri::command] async fn`, where `blocking_read`
+/// would panic) and then runs the shared pure validator.
+pub async fn validate_path_async(
+    path: &str,
+    window_label: &str,
+    state: &tauri::State<'_, ProjectRootState>,
+) -> Result<PathBuf, String> {
+    let root = {
+        let map = state.read().await;
+        map.get(window_label)
+            .and_then(|opt| opt.as_ref())
+            .ok_or_else(|| "No project is open".to_string())?
+            .clone()
+    };
+    resolve_validated_path(path, &root)
 }
 
 // ── Copy-naming helper (used by paste, import, duplicate) ────────
@@ -264,13 +319,15 @@ fn read_dir_recursive(
 }
 
 #[tauri::command]
-pub fn read_file_content(
+pub async fn read_file_content(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, ProjectRootState>,
     path: String,
 ) -> Result<String, String> {
-    validate_path(&path, window.label(), &state)?;
-    let meta = fs::metadata(&path).map_err(|e| format!("Failed to read file: {}", e.kind()))?;
+    let canonical = validate_path_async(&path, window.label(), &state).await?;
+    let meta = tokio::fs::metadata(&canonical)
+        .await
+        .map_err(|e| format!("Failed to read file: {}", e.kind()))?;
     if meta.len() > MAX_TEXT_FILE_BYTES {
         return Err(format!(
             "FILE_TOO_LARGE: {} bytes; limit {}",
@@ -278,7 +335,9 @@ pub fn read_file_content(
             MAX_TEXT_FILE_BYTES
         ));
     }
-    fs::read_to_string(&path).map_err(|e| format!("Failed to read file: {}", e.kind()))
+    tokio::fs::read_to_string(&canonical)
+        .await
+        .map_err(|e| format!("Failed to read file: {}", e.kind()))
 }
 
 #[tauri::command]
@@ -288,7 +347,7 @@ pub fn write_file_content(
     path: String,
     content: String,
 ) -> Result<(), String> {
-    validate_path(&path, window.label(), &state)?;
+    let canonical = validate_path(&path, window.label(), &state)?;
     if content.len() as u64 > MAX_TEXT_FILE_BYTES {
         return Err(format!(
             "CONTENT_TOO_LARGE: {} bytes; limit {}",
@@ -296,17 +355,19 @@ pub fn write_file_content(
             MAX_TEXT_FILE_BYTES
         ));
     }
-    fs::write(&path, &content).map_err(|e| format!("Failed to write file: {}", e.kind()))
+    fs::write(&canonical, &content).map_err(|e| format!("Failed to write file: {}", e.kind()))
 }
 
 #[tauri::command]
-pub fn read_file_binary(
+pub async fn read_file_binary(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, ProjectRootState>,
     path: String,
 ) -> Result<String, String> {
-    validate_path(&path, window.label(), &state)?;
-    let meta = fs::metadata(&path).map_err(|e| format!("Failed to read file: {}", e.kind()))?;
+    let canonical = validate_path_async(&path, window.label(), &state).await?;
+    let meta = tokio::fs::metadata(&canonical)
+        .await
+        .map_err(|e| format!("Failed to read file: {}", e.kind()))?;
     if meta.len() > MAX_BINARY_FILE_BYTES {
         return Err(format!(
             "FILE_TOO_LARGE: {} bytes; limit {}",
@@ -314,8 +375,16 @@ pub fn read_file_binary(
             MAX_BINARY_FILE_BYTES
         ));
     }
-    let bytes = fs::read(&path).map_err(|e| format!("Failed to read file: {}", e.kind()))?;
-    Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
+    let bytes = tokio::fs::read(&canonical)
+        .await
+        .map_err(|e| format!("Failed to read file: {}", e.kind()))?;
+    // base64 of up to 100 MB is CPU-heavy; run it on the blocking pool so we
+    // don't stall the async reactor.
+    tokio::task::spawn_blocking(move || {
+        base64::engine::general_purpose::STANDARD.encode(&bytes)
+    })
+    .await
+    .map_err(|e| format!("Failed to encode file: {}", e))
 }
 
 #[tauri::command]
@@ -325,11 +394,52 @@ pub fn get_home_dir() -> Result<String, String> {
         .ok_or_else(|| "Could not determine home directory".to_string())
 }
 
+/// Validate a path for `create_project_dir`. This command intentionally runs
+/// without an open project (the welcome-screen "New Project" action), so it
+/// cannot use `validate_path`. We still constrain it: the target must be an
+/// absolute path, free of traversal (`..`) and sensitive components, and of
+/// sane depth so it can't be used to scatter directories across the disk.
+const MAX_NEW_PROJECT_DEPTH: usize = 40;
+
+pub(crate) fn validate_new_project_dir(path: &str) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Invalid directory: path cannot be empty".to_string());
+    }
+    if trimmed.starts_with('-') {
+        return Err("Invalid directory: cannot start with '-'".to_string());
+    }
+    let p = PathBuf::from(trimmed);
+    if !p.is_absolute() {
+        return Err("Invalid directory: must be an absolute path".to_string());
+    }
+    let mut depth = 0usize;
+    for component in p.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                return Err("Invalid directory: traversal ('..') not allowed".to_string());
+            }
+            std::path::Component::Normal(_) => depth += 1,
+            _ => {}
+        }
+    }
+    if depth > MAX_NEW_PROJECT_DEPTH {
+        return Err("Invalid directory: path is too deeply nested".to_string());
+    }
+    if has_sensitive_component(&p) {
+        return Err(
+            "Invalid directory: cannot create inside a protected sensitive directory".to_string(),
+        );
+    }
+    Ok(p)
+}
+
 /// Create a directory (and parents) without requiring a project to be open.
 /// Used by the "New Project" welcome screen action.
 #[tauri::command]
 pub fn create_project_dir(path: String) -> Result<(), String> {
-    std::fs::create_dir_all(&path).map_err(|e| format!("Failed to create directory: {}", e))
+    let target = validate_new_project_dir(&path)?;
+    std::fs::create_dir_all(&target).map_err(|e| format!("Failed to create directory: {}", e))
 }
 
 #[tauri::command]
@@ -448,14 +558,7 @@ pub fn import_external_files(
         }
         let canonical_src =
             fs::canonicalize(&src_path).map_err(|e| format!("Invalid source: {}", e))?;
-        let blocked = [".ssh", ".gnupg", ".aws"];
-        let is_sensitive = canonical_src.components().any(|c| {
-            matches!(
-                c,
-                std::path::Component::Normal(name) if blocked.iter().any(|b| name == std::ffi::OsStr::new(b))
-            )
-        });
-        if is_sensitive {
+        if has_sensitive_component(&canonical_src) {
             return Err(format!("Cannot import from sensitive directory: {}", src));
         }
         let file_name = src_path
@@ -634,16 +737,19 @@ fn copy_dir_recursive_inner(src: &Path, dst: &Path, depth: u32) -> Result<(), St
 // ── File listing ─────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn list_all_files(
+pub async fn list_all_files(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, ProjectRootState>,
     path: String,
 ) -> Result<Vec<String>, String> {
-    validate_path(&path, window.label(), &state)?;
-    let root = PathBuf::from(&path);
-    let mut files = Vec::new();
-    collect_files(&root, &root, &mut files, 0);
-    Ok(files)
+    let canonical = validate_path_async(&path, window.label(), &state).await?;
+    tokio::task::spawn_blocking(move || {
+        let mut files = Vec::new();
+        collect_files(&canonical, &canonical, &mut files, 0);
+        files
+    })
+    .await
+    .map_err(|e| format!("Failed to list files: {}", e))
 }
 
 const MAX_COLLECT_DEPTH: u32 = 100;
@@ -663,6 +769,13 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>, depth: u32) {
         }
         let name = entry.file_name().to_string_lossy().to_string();
         if name == ".git" || name == "node_modules" || name == "target" || name == ".DS_Store" {
+            continue;
+        }
+        // Never enumerate credential directories, even by name.
+        if SENSITIVE_DIR_NAMES
+            .iter()
+            .any(|s| name.eq_ignore_ascii_case(s))
+        {
             continue;
         }
         let ft = match entry.file_type() {
@@ -686,6 +799,116 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>, depth: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── B (MEDIUM): sensitive-directory deny-list ───────────────
+
+    // ── C (LOW): create_project_dir validation ──────────────────
+
+    #[test]
+    fn new_project_dir_rejects_empty_and_relative() {
+        assert!(validate_new_project_dir("").is_err());
+        assert!(validate_new_project_dir("   ").is_err());
+        assert!(validate_new_project_dir("relative/path").is_err());
+        assert!(validate_new_project_dir("-flag").is_err());
+    }
+
+    #[test]
+    fn new_project_dir_rejects_sensitive_and_traversal() {
+        assert!(validate_new_project_dir("/home/u/.ssh/evil").is_err());
+        assert!(validate_new_project_dir("/home/u/.aws").is_err());
+        assert!(validate_new_project_dir("/home/u/proj/../../etc/cron.d").is_err());
+    }
+
+    #[test]
+    fn new_project_dir_rejects_excessive_depth() {
+        let deep = format!("/{}", vec!["a"; 100].join("/"));
+        assert!(validate_new_project_dir(&deep).is_err());
+    }
+
+    #[test]
+    fn new_project_dir_accepts_reasonable_absolute_path() {
+        assert!(validate_new_project_dir("/Users/dev/projects/my-new-app").is_ok());
+    }
+
+    // ── B (MEDIUM): resolve_validated_path end-to-end ───────────
+
+    #[test]
+    fn resolve_validated_path_allows_file_inside_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let f = root.join("src");
+        fs::create_dir(&f).unwrap();
+        fs::write(f.join("main.rs"), b"x").unwrap();
+        let got = resolve_validated_path(&f.join("main.rs").to_string_lossy(), &root).unwrap();
+        assert!(got.starts_with(&root));
+    }
+
+    #[test]
+    fn resolve_validated_path_rejects_outside_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        // An existing path outside the root (the system temp parent).
+        let outside = fs::canonicalize(std::env::temp_dir()).unwrap();
+        let res = resolve_validated_path(&outside.to_string_lossy(), &root);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn resolve_validated_path_rejects_sensitive_dir_inside_root() {
+        // Even when .ssh lives *inside* the project root, reads are denied.
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let ssh = root.join(".ssh");
+        fs::create_dir(&ssh).unwrap();
+        fs::write(ssh.join("id_rsa"), b"secret").unwrap();
+        let res = resolve_validated_path(&ssh.join("id_rsa").to_string_lossy(), &root);
+        assert!(res.is_err(), "must deny .ssh even inside the root");
+    }
+
+    #[test]
+    fn sensitive_component_is_case_insensitive() {
+        // macOS/Windows are case-insensitive: `.SSH` must be treated as `.ssh`.
+        assert!(has_sensitive_component(Path::new("/home/u/proj/.SSH/id_rsa")));
+        assert!(has_sensitive_component(Path::new("/home/u/.AWS/credentials")));
+        assert!(has_sensitive_component(Path::new("/home/u/.GnuPG/x")));
+    }
+
+    #[test]
+    fn collect_files_skips_sensitive_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("src")).unwrap();
+        fs::write(root.join("src/main.rs"), b"x").unwrap();
+        let ssh = root.join(".ssh");
+        fs::create_dir(&ssh).unwrap();
+        fs::write(ssh.join("id_rsa"), b"secret").unwrap();
+
+        let mut files = Vec::new();
+        collect_files(root, root, &mut files, 0);
+        assert!(files.iter().any(|f| f.contains("main.rs")));
+        assert!(
+            !files.iter().any(|f| f.contains("id_rsa")),
+            "must not enumerate files inside .ssh"
+        );
+    }
+
+    #[test]
+    fn sensitive_component_detects_credential_dirs() {
+        assert!(has_sensitive_component(Path::new("/home/u/proj/.ssh/id_rsa")));
+        assert!(has_sensitive_component(Path::new("/home/u/.aws/credentials")));
+        assert!(has_sensitive_component(Path::new("/home/u/.gnupg/secring.gpg")));
+        // The sensitive component can be at any depth.
+        assert!(has_sensitive_component(Path::new("/a/b/.ssh")));
+    }
+
+    #[test]
+    fn sensitive_component_allows_ordinary_paths() {
+        assert!(!has_sensitive_component(Path::new("/home/u/proj/src/main.rs")));
+        // Exact match only — a file that merely contains the substring is fine.
+        assert!(!has_sensitive_component(Path::new("/home/u/proj/.sshconfig")));
+        assert!(!has_sensitive_component(Path::new("/home/u/proj/my.aws.notes")));
+        assert!(!has_sensitive_component(Path::new("/home/u/proj/awsstuff")));
+    }
 
     #[test]
     fn create_project_root_state_starts_empty() {

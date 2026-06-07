@@ -6,7 +6,7 @@
   import { startDrag } from '@crabnebula/tauri-plugin-drag';
   import Icon from '@iconify/svelte';
   import { FolderOpen, Folder, ChevronRight, Link2 } from 'lucide-svelte';
-  import { projectRoot, hiddenPatterns, renameOpenFile, fileTreeRefreshTrigger, closeAllUnpinned, sharedGitStatus, sharedGitRemoteStatus, gitBranch, addFile, togglePin, activeFilePath, fileTreeNavTarget, openDiagrams, diagramPath, showPreview, createFileSignal, createFolderSignal, expandedDirsStore, showTerminal, resetTerminalSignal, watchAdd, watchRemove, attachFile, showChat, previewUrl, activeTerminalCwd, pendingTerminalCwd, shouldFollowCwd } from '../../modules';
+  import { projectRoot, hiddenPatterns, renameOpenFile, fileTreeRefreshTrigger, closeAllUnpinned, sharedGitStatus, sharedGitRemoteStatus, gitBranch, addFile, togglePin, activeFilePath, fileTreeNavTarget, openDiagrams, diagramPath, showPreview, createFileSignal, createFolderSignal, expandedDirsStore, showTerminal, resetTerminalSignal, watchAdd, watchRemove, attachFile, showChat, previewUrl, activeTerminalCwd, pendingTerminalCwd, shouldFollowCwd, rememberExpansion, recallExpansion, planExpansionRestore } from '../../modules';
   import { saveSessionNow, findRecentProject } from '../../modules/session';
   import { beginGitBranchRequest, getLatestGitBranchRequestId, updateGitBranch } from '../../modules/git/branchUpdate';
   import { log } from '../../modules/logging';
@@ -555,6 +555,10 @@
       } catch (e) {
         log.error('Failed to save session before folder switch', e);
       }
+      // Remember the outgoing root's open folders in the in-memory cache too,
+      // so returning to it later restores the freshest expansion (matches the
+      // terminal-cwd follow behavior).
+      rememberExpansion(rootPath, expandedDirs);
     }
     rootPath = path;
     const canonical = await invoke<string>('set_project_root', { path: rootPath });
@@ -563,8 +567,14 @@
     closeAllUnpinned();
     openDiagrams.set([]);
     showPreview.set(false);
-    expandedDirs = new Set([rootPath]);
+    // Seed open folders from the in-memory expansion cache (shared with the
+    // terminal-cwd follow path). On-disk session state is unioned in below
+    // when this project is in recents.
+    const recalledDirs = recallExpansion(canonical);
+    const seed = planExpansionRestore(canonical, recalledDirs);
+    expandedDirs = seed.expanded;
     await loadDirectory(rootPath);
+    await renderExpandedChildren(seed.childLoadOrder);
     await fetchGitStatus(false);
     startWatching(rootPath);
     startGitPolling();
@@ -594,22 +604,16 @@
         }
         if (project) {
           if (project.session.preview_url) previewUrl.set(project.session.preview_url);
-          // Restore expanded directories
+          // Restore expanded directories: union on-disk session state with
+          // the fresher in-memory cache seeded above.
           if (project.session.expanded_dirs && project.session.expanded_dirs.length > 0) {
-            const dirs = new Set<string>(project.session.expanded_dirs);
-            // Always include the root
-            dirs.add(rootPath!);
-            expandedDirs = dirs;
-            // Load children for each expanded dir so the tree renders them
-            for (const dir of project.session.expanded_dirs) {
-              if (dir === rootPath) continue;
-              try {
-                const children = await invoke<FileEntry[]>('read_dir_tree', { path: dir, depth: 1 });
-                // Find the entry in the tree and set its children
-                setChildrenDeep(files, dir, children);
-              } catch { /* dir may no longer exist */ }
-            }
-            files = [...files]; // trigger reactivity
+            const { expanded, childLoadOrder } = planExpansionRestore(
+              canonical,
+              recalledDirs,
+              project.session.expanded_dirs,
+            );
+            expandedDirs = expanded;
+            await renderExpandedChildren(childLoadOrder);
           }
           // Restore terminal visibility, then refresh terminals so they
           // start in THIS project's directory (a lingering home/startup
@@ -647,10 +651,18 @@
     // A newer cd superseded us while awaiting — drop this stale re-root.
     if (seq !== followCwdSeq) return;
     if (!shouldFollowCwd(rootPath, canonical)) return;
+    // Remember the folders open under the root we're leaving, so returning
+    // to it (e.g. switching back to a terminal in that dir) restores them
+    // instead of collapsing to just the root.
+    if (rootPath) rememberExpansion(rootPath, expandedDirs);
     rootPath = canonical;
     projectRoot.set(canonical);
-    expandedDirs = new Set([canonical]);
+    // Restore the previously-open folders for the directory we're entering.
+    const recalled = recallExpansion(canonical);
+    const { expanded, childLoadOrder } = planExpansionRestore(canonical, recalled);
+    expandedDirs = expanded;
     await loadDirectory(canonical);
+    await renderExpandedChildren(childLoadOrder);
     await fetchGitStatus(false);
     startWatching(canonical);
     startGitPolling();
@@ -684,6 +696,22 @@
       }
     }
     return false;
+  }
+
+  /** Fetch and attach children for an already-ordered list of expanded
+   *  directories (shallowest-first, root excluded — see planExpansionRestore)
+   *  so the tree renders them as open. Triggers one reactivity flush. */
+  async function renderExpandedChildren(dirs: string[]) {
+    let any = false;
+    for (const dir of dirs) {
+      if (dir === rootPath) continue;
+      any = true;
+      try {
+        const children = await invoke<FileEntry[]>('read_dir_tree', { path: dir, depth: 1 });
+        setChildrenDeep(files, dir, children);
+      } catch { /* dir may no longer exist */ }
+    }
+    if (any) files = [...files]; // trigger reactivity
   }
 
   async function loadDirectory(path: string) {

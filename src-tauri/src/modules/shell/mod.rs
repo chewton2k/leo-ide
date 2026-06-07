@@ -3,6 +3,7 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 
 pub mod background;
 pub mod da_filter;
+pub mod policy;
 mod ringbuffer;
 pub mod session;
 mod shell_init;
@@ -364,6 +365,12 @@ pub async fn run_command_capture(
     timeout_ms: u64,
     state: tauri::State<'_, ProjectRootState>,
 ) -> Result<CommandOutput, String> {
+    if policy::is_catastrophic_command(&command) {
+        return Err(
+            "Refused by safety policy: command appears to perform irreversible destruction"
+                .to_string(),
+        );
+    }
     // Validate cwd is within project root (async context — must use .read().await)
     let label = window.label().to_string();
     let root = {
@@ -463,6 +470,12 @@ pub fn shell_bg_spawn(
     command: String,
     cwd: Option<String>,
 ) -> Result<u32, String> {
+    if policy::is_catastrophic_command(&command) {
+        return Err(
+            "Refused by safety policy: command appears to perform irreversible destruction"
+                .to_string(),
+        );
+    }
     let cwd_path = resolve_bg_cwd(&window, &project_root, cwd)?;
     let proc = background::spawn(command, cwd_path)?;
     let id = state

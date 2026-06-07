@@ -96,6 +96,74 @@ pub fn validate_git_ref_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate a `git clone` URL.
+///
+/// The critical risk this defends against is git's transport-helper syntax:
+/// a URL like `ext::sh -c "<cmd>"` makes `git clone` execute an arbitrary
+/// command (RCE), and `file://` / leading-dash inputs broaden the attack
+/// surface. We allow only the common network transports and scp-like
+/// `[user@]host:path` syntax.
+pub fn validate_clone_url(url: &str) -> Result<(), String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("Invalid clone URL: cannot be empty".to_string());
+    }
+    if url.starts_with('-') {
+        return Err("Invalid clone URL: cannot start with '-' (flag injection)".to_string());
+    }
+    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("Invalid clone URL: contains control or whitespace characters".to_string());
+    }
+    // `<helper>::<address>` transport helpers (ext::, fd::, …) can execute
+    // arbitrary commands. Any double-colon is rejected; scp syntax uses a
+    // single colon so this does not affect `git@host:path`.
+    if url.contains("::") {
+        return Err("Invalid clone URL: transport helpers ('::') are not allowed".to_string());
+    }
+
+    if let Some(scheme_end) = url.find("://") {
+        let scheme = url[..scheme_end].to_ascii_lowercase();
+        match scheme.as_str() {
+            "https" | "http" | "git" | "ssh" => Ok(()),
+            other => Err(format!("Invalid clone URL: scheme '{other}' is not allowed")),
+        }
+    } else {
+        // No scheme → only accept scp-like `[user@]host:path`. The host
+        // portion (before the first ':') must be non-empty and contain no
+        // '/', which distinguishes it from a local filesystem path.
+        match url.split_once(':') {
+            Some((host, path))
+                if !host.is_empty() && !host.contains('/') && !path.is_empty() =>
+            {
+                Ok(())
+            }
+            _ => Err(
+                "Invalid clone URL: must be http(s)://, git://, ssh://, or user@host:path"
+                    .to_string(),
+            ),
+        }
+    }
+}
+
+/// Validate a `git clone` destination directory. Rejects flag-injection
+/// (leading '-') and requires an existing directory; returns the canonical
+/// path so the spawned process runs in a fully-resolved location.
+pub fn validate_clone_dest(dest: &str) -> Result<PathBuf, String> {
+    let trimmed = dest.trim();
+    if trimmed.is_empty() {
+        return Err("Invalid destination: cannot be empty".to_string());
+    }
+    if trimmed.starts_with('-') {
+        return Err("Invalid destination: cannot start with '-'".to_string());
+    }
+    let canonical =
+        fs::canonicalize(trimmed).map_err(|e| format!("Invalid destination: {}", e))?;
+    if !canonical.is_dir() {
+        return Err("Invalid destination: not a directory".to_string());
+    }
+    Ok(canonical)
+}
+
 // ── Serializable types ───────────────────────────────────────────
 
 #[derive(Serialize, Clone)]
@@ -1701,8 +1769,11 @@ pub fn find_git_repos(
 /// Used by the "Clone Repo" welcome screen action.
 #[tauri::command]
 pub async fn git_clone(url: String, dest: String) -> Result<(), String> {
+    validate_clone_url(&url)?;
+    let url = url.trim();
+    let dest = validate_clone_dest(&dest)?;
     let output = tokio::process::Command::new("git")
-        .args(["clone", &url])
+        .args(["clone", "--", url])
         .current_dir(&dest)
         .output()
         .await
@@ -1717,6 +1788,76 @@ pub async fn git_clone(url: String, dest: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── A (CRITICAL): git_clone URL + destination validation ────
+
+    #[test]
+    fn clone_url_rejects_transport_helpers_rce() {
+        // git's `ext::`/transport-helper syntax executes arbitrary commands.
+        assert!(validate_clone_url("ext::sh -c \"touch /tmp/pwned\"").is_err());
+        assert!(validate_clone_url("ext::sh -c id").is_err());
+        assert!(validate_clone_url("fd::17/foo").is_err());
+        // Any `::` is a helper indicator and must be rejected.
+        assert!(validate_clone_url("something::else").is_err());
+    }
+
+    #[test]
+    fn clone_url_rejects_file_scheme() {
+        assert!(validate_clone_url("file:///etc/passwd").is_err());
+        assert!(validate_clone_url("FILE://x").is_err());
+    }
+
+    #[test]
+    fn clone_url_rejects_leading_dash_flag_injection() {
+        assert!(validate_clone_url("-u./payload").is_err());
+        assert!(validate_clone_url("--upload-pack=touch /tmp/x").is_err());
+    }
+
+    #[test]
+    fn clone_url_rejects_control_and_whitespace() {
+        assert!(validate_clone_url("https://example.com/repo .git").is_err());
+        assert!(validate_clone_url("https://example.com/\nrepo.git").is_err());
+        assert!(validate_clone_url("").is_err());
+        assert!(validate_clone_url("   ").is_err());
+    }
+
+    #[test]
+    fn clone_url_rejects_disallowed_schemes() {
+        assert!(validate_clone_url("ftp://example.com/repo.git").is_err());
+        assert!(validate_clone_url("javascript://x").is_err());
+    }
+
+    #[test]
+    fn clone_url_accepts_common_transports() {
+        assert!(validate_clone_url("https://github.com/chewton2k/leo-ide.git").is_ok());
+        assert!(validate_clone_url("http://example.com/repo.git").is_ok());
+        assert!(validate_clone_url("git://example.com/repo.git").is_ok());
+        assert!(validate_clone_url("ssh://git@github.com/owner/repo.git").is_ok());
+        // scp-like syntax
+        assert!(validate_clone_url("git@github.com:owner/repo.git").is_ok());
+    }
+
+    #[test]
+    fn clone_dest_rejects_leading_dash_and_missing() {
+        assert!(validate_clone_dest("-rf").is_err());
+        assert!(validate_clone_dest("").is_err());
+        assert!(validate_clone_dest("/no/such/leo-clone-dir-xyz").is_err());
+    }
+
+    #[test]
+    fn clone_dest_accepts_existing_dir_and_returns_canonical() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = validate_clone_dest(&dir.path().to_string_lossy()).unwrap();
+        assert!(out.is_dir());
+    }
+
+    #[test]
+    fn clone_dest_rejects_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("notadir.txt");
+        std::fs::write(&f, b"x").unwrap();
+        assert!(validate_clone_dest(&f.to_string_lossy()).is_err());
+    }
 
     #[test]
     fn test_validate_git_ref_name_rejects_bad_inputs() {

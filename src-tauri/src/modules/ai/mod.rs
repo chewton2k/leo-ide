@@ -29,17 +29,27 @@ const SERVICE_NAME: &str = "leo-ide";
 
 // ── Key storage ──
 //
-// Order of preference, on every read AND write:
+// Write path (`set_key`):
 //
-//   1. OS keyring (primary, never on disk)
-//   2. ChaCha20-Poly1305 encrypted file at `<base>/keys.enc`. The 32-byte
-//      master key is itself stored in the keyring under `__file_key__`,
-//      so the file is meaningless without keyring access.
-//   3. Last-resort: derive the master key from machine-specific paths so
-//      we can still read keys.enc on systems with no keyring at all.
-//      This is *obfuscation*, not strong protection — see the security
-//      notes in the deferred-items plan. The primary protections at this
-//      tier are OS-level FDE and the 0o600 file permissions.
+//   1. Write the key to the OS keyring and verify it by reading it back.
+//   2. If the keyring write VERIFIES, the keyring is the sole store: any
+//      pre-existing encrypted-file copy for that provider is deleted so we
+//      never leave a recoverable secret on disk when a real secret store is
+//      available.
+//   3. If the keyring is unavailable/unverifiable, fall back to the
+//      ChaCha20-Poly1305 encrypted file at `<base>/keys.enc` so the key
+//      survives restarts.
+//
+// Read path (`get_key`): keyring first, then the encrypted file.
+//
+// IMPORTANT — encrypted-file key derivation is OBFUSCATION, not strong
+// protection. The file's 32-byte key is derived deterministically from
+// machine paths + a build-time salt (`derive_machine_file_key`); it is NOT a
+// random secret kept in the keyring. The encrypted file therefore protects
+// keys only against casual disk inspection; the real protections are the OS
+// keyring (when present), OS-level full-disk encryption, and the 0o600 file
+// permissions. The file path exists for durability on systems with no
+// working keyring, where the user accepts weaker at-rest confidentiality.
 //
 // Migration: any plaintext `keys.json` left over from earlier builds is
 // re-keyed into the new format on startup and renamed to `keys.json.bak`.
@@ -112,28 +122,65 @@ fn get_key(provider: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// Pure orchestration core for storing a provider key, parameterized over
+/// the keyring and encrypted-file backends so it can be unit-tested without
+/// touching the real OS keyring or the user's home directory.
+///
+/// * `keyring_set_verified(provider, key) -> bool` — write to the keyring and
+///   return whether the write was verified (read back equal).
+/// * On a verified keyring write we delete any encrypted-file copy so no
+///   recoverable secret is left on disk. Otherwise we persist to the file.
+fn set_key_impl(
+    provider: &str,
+    key: &str,
+    mut keyring_set_verified: impl FnMut(&str, &str) -> bool,
+    mut keyring_delete: impl FnMut(&str),
+    mut file_put: impl FnMut(&str, &str) -> Result<(), String>,
+    mut file_remove: impl FnMut(&str),
+) -> Result<(), String> {
+    if key.is_empty() {
+        keyring_delete(provider);
+        file_remove(provider);
+        return Ok(());
+    }
+    if keyring_set_verified(provider, key) {
+        // Keyring durably holds the secret — don't leave a file-recoverable
+        // copy behind (removes any older fallback copy too).
+        file_remove(provider);
+        Ok(())
+    } else {
+        // No usable keyring: the encrypted file is the durable store.
+        file_put(provider, key)
+    }
+}
+
 fn set_key(provider: &str, key: &str) -> Result<(), String> {
     let file_key = get_or_create_file_key()?;
     let dir = keys_dir();
-
-    if key.is_empty() {
-        // Delete from both stores so a stale entry can't shadow a new one.
-        if let Ok(entry) = Entry::new(SERVICE_NAME, provider) {
-            let _ = entry.delete_credential();
-        }
-        let _ = key_store::remove(&dir, &file_key, provider);
-        return Ok(());
-    }
-
-    // Always write to the encrypted file store (authoritative, durable).
-    key_store::put(&dir, &file_key, provider, key)?;
-
-    // Best-effort write to OS keyring (fast-path cache for reads).
-    if let Ok(entry) = Entry::new(SERVICE_NAME, provider) {
-        let _ = entry.set_password(key);
-    }
-
-    Ok(())
+    set_key_impl(
+        provider,
+        key,
+        |p, k| {
+            // Write to the keyring, then verify with a read-back.
+            if let Ok(entry) = Entry::new(SERVICE_NAME, p) {
+                if entry.set_password(k).is_ok() {
+                    if let Ok(got) = entry.get_password() {
+                        return got == k;
+                    }
+                }
+            }
+            false
+        },
+        |p| {
+            if let Ok(entry) = Entry::new(SERVICE_NAME, p) {
+                let _ = entry.delete_credential();
+            }
+        },
+        |p, k| key_store::put(&dir, &file_key, p, k),
+        |p| {
+            let _ = key_store::remove(&dir, &file_key, p);
+        },
+    )
 }
 
 /// Migrate any plaintext `keys.json` from older builds into the new
@@ -837,6 +884,74 @@ mod tests {
             *b = seed.wrapping_add(i as u8);
         }
         k
+    }
+
+    // ── D (MEDIUM): key persistence routing ─────────────────────
+
+    #[derive(Default)]
+    struct FakeStores {
+        keyring: std::cell::RefCell<HashMap<String, String>>,
+        file: std::cell::RefCell<HashMap<String, String>>,
+        file_put_calls: std::cell::RefCell<usize>,
+        file_remove_calls: std::cell::RefCell<usize>,
+    }
+
+    fn run_set_key(stores: &FakeStores, provider: &str, key: &str, keyring_works: bool) {
+        set_key_impl(
+            provider,
+            key,
+            |p, k| {
+                // keyring set + verify
+                if keyring_works {
+                    stores.keyring.borrow_mut().insert(p.to_string(), k.to_string());
+                    true
+                } else {
+                    false
+                }
+            },
+            |p| {
+                stores.keyring.borrow_mut().remove(p);
+            },
+            |p, k| {
+                *stores.file_put_calls.borrow_mut() += 1;
+                stores.file.borrow_mut().insert(p.to_string(), k.to_string());
+                Ok(())
+            },
+            |p| {
+                *stores.file_remove_calls.borrow_mut() += 1;
+                stores.file.borrow_mut().remove(p);
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn verified_keyring_write_does_not_persist_recoverable_file_copy() {
+        let s = FakeStores::default();
+        run_set_key(&s, "openai", "sk-secret", true);
+        assert_eq!(s.keyring.borrow().get("openai").map(String::as_str), Some("sk-secret"));
+        // No file copy written; a stale copy would have been removed.
+        assert_eq!(*s.file_put_calls.borrow(), 0, "must NOT write keys.enc when keyring verifies");
+        assert!(s.file.borrow().get("openai").is_none());
+        assert!(*s.file_remove_calls.borrow() >= 1);
+    }
+
+    #[test]
+    fn unavailable_keyring_falls_back_to_encrypted_file() {
+        let s = FakeStores::default();
+        run_set_key(&s, "openai", "sk-secret", false);
+        assert_eq!(*s.file_put_calls.borrow(), 1, "must persist keys.enc when keyring unusable");
+        assert_eq!(s.file.borrow().get("openai").map(String::as_str), Some("sk-secret"));
+    }
+
+    #[test]
+    fn empty_key_clears_both_stores() {
+        let s = FakeStores::default();
+        run_set_key(&s, "openai", "sk-secret", false); // seed the file store
+        run_set_key(&s, "openai", "", true); // now clear
+        assert!(s.keyring.borrow().get("openai").is_none());
+        assert!(s.file.borrow().get("openai").is_none());
+        assert!(*s.file_remove_calls.borrow() >= 1);
     }
 
     #[test]
